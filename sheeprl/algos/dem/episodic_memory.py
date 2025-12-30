@@ -31,7 +31,7 @@ class EpisodicMemory(Dataset):
         self.k_nn: int = k_nn
         """Number of nearest neighbors to retrieve."""
 
-        self.trajectories: dict = {} # key: (h_t, z_t, a_t), value: (TrajectoryMemory, idx, uncertainty)
+        self.trajectories: dict = {} # key: (h_t, z_t, a_t), value: (TrajectoryMemory, idx, uncertainty, time of birth)
 
         self.current_trajectory: TrajectoryObject | None = None
 
@@ -129,10 +129,7 @@ class EpisodicMemory(Dataset):
     #     return np.concatenate([z, h, a], axis=0)
     
     def __str__(self):
-        return f"EM| Num trajectories: {len(self.trajectories)}\
-            | Trajectory length: {self.trajectory_length}\
-                | Uncertainty thr.: {self.uncertainty_threshold}\
-                    \n          | Current trajectory: {self.current_trajectory}"
+        return f"EM| Num trajectories: {len(self.trajectories)}| Trajectory length: {self.trajectory_length}| Uncertainty thr.: {self.uncertainty_threshold}| Current trajectory: {self.current_trajectory}"
 
 
     def __getitem__(self, idx):
@@ -141,14 +138,23 @@ class EpisodicMemory(Dataset):
         # sample = mem.get_trajectory(offset)
         # return sample
 
-    def get_samples(self):
+    def get_samples(self) -> list:
         """ Return all stored trajectories as list of samples.
-            Each sample is a tuple: starting_state, transitions)
+            Each sample is a tuple: (starting_state, transitions)
                 starting_state: (h_t, z_t, a_t)
                 transitions: list of (z_{t'}, a_{t'})
         """
-        # TODO:
-        return []
+        samples = []
+
+        for traj in self.trajectories:
+            traj_obj: TrajectoryObject = self.trajectories[traj][0]
+            traj_nr: int = self.trajectories[traj][1]
+            
+            start_state = traj # The start state is in the key of the dict
+            transitions = traj_obj.get_trajectory(traj_nr)
+            samples.append((start_state, transitions))
+        
+        return samples
 
     # def add(self, key: tuple, value: tuple, uncertainty: float):
     #     """ Add new trajectory """
@@ -339,6 +345,25 @@ class TrajectoryObject:
     def __str__(self):
         return f"TrajectoryObj| Free space: {self.free_space}| Trajectory length: {self.trajectory_length} \
 | Traj num. to offset: {self.traj_num_to_offset}"
+    
+    def get_trajectory(self, traj_nr) -> list[np.array]:
+        """Returns a specific trajectory in full"""
+        start_idx = self.traj_num_to_offset[traj_nr-1]+self.trajectory_length if traj_nr-1 >=0 else 0
+        end_idx = start_idx + self.trajectory_length
+
+        return np.array(self.memory[start_idx:end_idx], dtype=object)
+
+    def get_all_trajectories(self) -> list[np.array]:
+        """Return a list of all trajecotries, without indices"""
+        trajectories = []
+
+        for traj_nr in range(self.num_trajectories):
+            start_idx = self.traj_num_to_offset[traj_nr-1]+self.trajectory_length if traj_nr-1 >=0 else 0
+            end_idx = start_idx + self.trajectory_length
+
+            trajectories.append(np.array(self.memory[start_idx:end_idx], dtype=object))
+        
+        return trajectories
 
 # class HybridKNN:
 #     def __init__(self, latent_tuples, w_discrete=1.0, w_cont=1.0, include_a=True):
