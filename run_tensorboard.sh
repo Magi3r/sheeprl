@@ -1,0 +1,1 @@
+uvx tensorboard --logdir ./logs
