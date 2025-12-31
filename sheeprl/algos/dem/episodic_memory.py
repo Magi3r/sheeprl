@@ -3,8 +3,9 @@ import hnswlib
 from torch.utils.data import Dataset, DataLoader
 import torch
 from sklearn.neighbors import KNeighborsClassifier
+import warnings
 
-class EpisodicMemory(Dataset):
+class EpisodicMemory():
     """
     Episodic Memory object for trajectory management.
 
@@ -13,7 +14,7 @@ class EpisodicMemory(Dataset):
                     nr stores the number within trajectory object
                 ...
     """
-    def __init__(self, trajectory_length: int, uncertainty_threshold: float, z_shape, action_shape, k_nn: int = 5, max_elements: int = 1000):
+    def __init__(self, trajectory_length: int, uncertainty_threshold: float, z_shape, h_shape, a_shape, k_nn: int = 5, max_elements: int = 1000):
         """
         Docstring for __init__
         
@@ -26,7 +27,8 @@ class EpisodicMemory(Dataset):
         self.trajectory_length: int = trajectory_length
         self.uncertainty_threshold: float = uncertainty_threshold
         """Threshold for uncertainty to start a new trajectory"""
-        self.key_size = z_shape 
+        self.key_size = h_shape # + z_shape + a_shape # TODO: will probably need to change if shapes are not 1D
+        """Size of the key vector (h, z, a)"""
 
         self.k_nn: int = k_nn
         """Number of nearest neighbors to retrieve."""
@@ -38,11 +40,12 @@ class EpisodicMemory(Dataset):
         self.prev_state = None
 
         self.hnsw_storage: hnswlib.Index = None
-        self._init_hnsw(max_elements=max_elements*2, dim = 32*32+512+6)
+        self._init_hnsw(max_elements=max_elements*2, dim = 32*32+512+6) # TODO: insert shapes properly hier error?
         self.step_counter = 0
         self.max_elements = max_elements
 
-
+        print(f"init EM with following shapes: z:{z_shape}, h:{h_shape}, a:{a_shape}, key_size: {self.key_size}")
+        warnings.warn("EpisodicMemory currently only works with a single environment instance!")
 
     def __len__(self):
         return len(self.trajectories)
@@ -56,6 +59,10 @@ class EpisodicMemory(Dataset):
         trajectory = self.current_trajectory if self.current_trajectory else TrajectoryObject(self.trajectory_length) # z_shape, action_shape
         self.current_trajectory = trajectory
 
+#   File "/home/dude/Desktop/sheeprl/sheeprl/algos/dem/episodic_memory.py", line 63, in __create_traj
+#     self.trajectories[key] = [trajectory, trajectory.new_traj(), uncertainty, self.step_counter]
+# TypeError: unhashable type: 'numpy.ndarray'
+
         # self.trajectories[key] = (trajectory, trajectory.last_idx(), uncertainty)
         self.trajectories[key] = [trajectory, trajectory.new_traj(), uncertainty, self.step_counter]
         
@@ -66,6 +73,7 @@ class EpisodicMemory(Dataset):
         if self.current_trajectory.add(value) == 0:
             self.current_trajectory = None
 
+    # !! use .tobytes() for key elements
     def remove_traj(self, key: tuple):
         """ Remove trajectory by its key """
         assert(key in self.trajectories)
@@ -85,8 +93,9 @@ class EpisodicMemory(Dataset):
         Fill the current trajectory with previous (state, action)
         Ends the trajectory and clears bookkeeping if done=True.
         """
-        #initial step, just store. Even if uncertain dont have a key for it
-        if self.prev_state == None:
+        # initial step, just store. Even if uncertain dont have a key for it 
+        # or if deter is None while filling replay_buffer
+        if self.prev_state == None or self.prev_state["deter"] is None:
             self.prev_state = state
             return
         
@@ -94,7 +103,7 @@ class EpisodicMemory(Dataset):
         if uncertainty > self.uncertainty_threshold:
             assert(self.prev_state is not None)
             # value = (z, h)          # (z_t, h_t)
-            key = (self.prev_state["deter"], self.prev_state["stoch"], action)    # (z_t, h_t, a_t) 
+            key = (self.prev_state["deter"].tobytes(), self.prev_state["stoch"].tobytes(), action.tobytes())    # (z_t, h_t, a_t) # for now fatten so dict can hash it
             
             if self.current_trajectory is not None:
                 self.__fill_traj((self.prev_state["stoch"], action))
@@ -146,11 +155,11 @@ class EpisodicMemory(Dataset):
         """
         samples = []
 
-        for traj in self.trajectories:
-            traj_obj: TrajectoryObject = self.trajectories[traj][0]
-            traj_nr: int = self.trajectories[traj][1]
-            
-            start_state = traj # The start state is in the key of the dict
+        for key, val in self.trajectories:
+            traj_obj: TrajectoryObject = val[0]
+            traj_nr: int = val[1]
+
+            start_state = (np.frombuffer(key[0]).reshape(1, 4096), np.frombuffer(key[1]).reshape(1, 1024), np.frombuffer(key[2]).reshap(1, 1, 1)) # The start state is in the key of the dict
             transitions = traj_obj.get_trajectory(traj_nr)
             samples.append((start_state, transitions))
         
@@ -178,7 +187,7 @@ class EpisodicMemory(Dataset):
         # M: max outgoing connections in graph, higher is better but slower, highly connected to dims
         # ef_construction: construction accuracy/speed tradeoff
         self.hnsw_storage = hnswlib.Index(space="l2", dim=dim)
-        self.hnsw_storage.init_index(max_elements, M = 16, ef_construction = 100, allow_replace_delete=True)
+        self.hnsw_storage.init_index(max_elements, M = 16, ef_construction = 100, allow_replace_deleted=True)
         # ef: query accuracy
         self.hnsw_storage.set_ef(50)
         if rebuild:

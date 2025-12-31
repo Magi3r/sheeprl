@@ -429,8 +429,11 @@ class RSSM(nn.Module):
         posterior = posterior.view(*posterior.shape[:-2], -1)
         posterior = (1 - is_first) * posterior + is_first * initial_posterior.view_as(posterior)
 
+        ### h
         recurrent_state = self.recurrent_model(torch.cat((posterior, action), -1), recurrent_state)
+        ### z^
         prior_logits, prior = self._transition(recurrent_state)
+        ### z
         posterior_logits, posterior = self._representation(recurrent_state, embedded_obs)
         return recurrent_state, posterior, prior, posterior_logits, prior_logits
 
@@ -464,6 +467,7 @@ class RSSM(nn.Module):
         logits = self._uniform_mix(logits)
         return logits, compute_stochastic_state(logits, discrete=self.discrete)
 
+    ### TODO: this is the Dynamics Predictor, need to add uncertainty calculation.
     def _transition(self, recurrent_out: Tensor, sample_state=True) -> Tuple[Tensor, Tensor]:
         """
         Args:
@@ -663,9 +667,10 @@ class PlayerDV3(nn.Module):
         obs: Dict[str, Tensor],
         greedy: bool = False,
         mask: Optional[Dict[str, Tensor]] = None,
+        return_rssm_stuff: bool = False
     ) -> Sequence[Tensor]:
         """
-        Return the greedy actions.
+        Return the greedy actions + EM required data (optional).
 
         Args:
             obs (Dict[str, Tensor]): the current observations.
@@ -674,21 +679,32 @@ class PlayerDV3(nn.Module):
 
         Returns:
             The actions the agent has to perform.
+            (optional) The recurrent state and the stochastic state.
         """
-        embedded_obs = self.encoder(obs)
+        embedded_obs = self.encoder(obs)    ## (first part from Encoder of the paper)
+        ### h
         self.recurrent_state = self.rssm.recurrent_model(
             torch.cat((self.stochastic_state, self.actions), -1), self.recurrent_state
         )
         if self.decoupled_rssm:
             _, self.stochastic_state = self.rssm._representation(embedded_obs)
+            raise NotImplementedError("DecoupledRSSM + DreamerV3 Actor not implemented yet.")
         else:
-            _, self.stochastic_state = self.rssm._representation(self.recurrent_state, embedded_obs)
+            ### TODO: calc also ^z so we can measure the uncertainty
+            ### prior_logits, prior = self.rssm._transition(self.recurrent_state)
+            uncertainty = 0.99
+            ### z            
+        _, self.stochastic_state = self.rssm._representation(self.recurrent_state, embedded_obs)    ## z (second part from Encoder of the paper)
         self.stochastic_state = self.stochastic_state.view(
             *self.stochastic_state.shape[:-2], self.stochastic_size * self.discrete_size
         )
         actions, _ = self.actor(torch.cat((self.stochastic_state, self.recurrent_state), -1), greedy, mask)
         self.actions = torch.cat(actions, -1)
-        return actions
+
+        if not return_rssm_stuff:
+            return actions
+        else:
+            return actions, self.recurrent_state, self.stochastic_state, uncertainty
 
 
 class Actor(nn.Module):
@@ -1094,7 +1110,7 @@ def build_agent(
         if cfg.algo.mlp_keys.decoder is not None and len(cfg.algo.mlp_keys.decoder) > 0
         else None
     )
-    observation_model = MultiDecoder(cnn_decoder, mlp_decoder)
+    observation_model = MultiDecoder(cnn_decoder, mlp_decoder)  # Decoder
 
     reward_ln_cls = hydra.utils.get_class(world_model_cfg.reward_model.layer_norm.cls)
     reward_model = MLP(

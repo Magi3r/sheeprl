@@ -40,6 +40,13 @@ from sheeprl.utils.registry import register_algorithm
 from sheeprl.utils.timer import timer
 from sheeprl.utils.utils import Ratio, save_configs
 
+import pkgutil
+
+# import os
+# os.environ["HYDRA_FULL_ERROR"] = "1"
+
+from sheeprl.algos.dem.episodic_memory import EpisodicMemory as EM
+
 # Decomment the following two lines if you cannot start an experiment with DMC environments
 # os.environ["PYOPENGL_PLATFORM"] = ""
 # os.environ["MUJOCO_GL"] = "osmesa"
@@ -60,6 +67,7 @@ def train(
     is_continuous: bool,
     actions_dim: Sequence[int],
     moments: Moments,
+    episodic_memory: EM,
 ) -> None:
     """Runs one-step update of the agent.
 
@@ -104,7 +112,7 @@ def train(
     batch_actions = torch.cat((torch.zeros_like(data["actions"][:1]), data["actions"][:-1]), dim=0)
 
     # Dynamic Learning
-    stoch_state_size = stochastic_size * discrete_size
+    stoch_state_size = stochastic_size * discrete_size  ## e.g. 32x32
     recurrent_state = torch.zeros(1, batch_size, recurrent_state_size, device=device)
     recurrent_states = torch.empty(sequence_length, batch_size, recurrent_state_size, device=device)
     priors_logits = torch.empty(sequence_length, batch_size, stoch_state_size, device=device)
@@ -112,6 +120,7 @@ def train(
     # Embed observations from the environment
     embedded_obs = world_model.encoder(batch_obs)
 
+    ### i think we use coupled???
     if cfg.algo.world_model.decoupled_rssm:
         posteriors_logits, posteriors = world_model.rssm._representation(embedded_obs)
         for i in range(0, sequence_length):
@@ -130,8 +139,10 @@ def train(
     else:
         posterior = torch.zeros(1, batch_size, stochastic_size, discrete_size, device=device)
         posteriors = torch.empty(sequence_length, batch_size, stochastic_size, discrete_size, device=device)
+        ### dreaming a sequence
         posteriors_logits = torch.empty(sequence_length, batch_size, stoch_state_size, device=device)
         for i in range(0, sequence_length):
+            ### h, z, z^
             recurrent_state, posterior, _, posterior_logits, prior_logits = world_model.rssm.dynamic(
                 posterior,
                 recurrent_state,
@@ -143,10 +154,13 @@ def train(
             priors_logits[i] = prior_logits
             posteriors[i] = posterior
             posteriors_logits[i] = posterior_logits
+
+    ### flatten posteriors but only the 32x32, keep (sequence_length, batch_size, 32x32)
+    ### concat with recurrent_states (sequence_length, batch_size, x)
     latent_states = torch.cat((posteriors.view(*posteriors.shape[:-2], -1), recurrent_states), -1)
 
     # Compute predictions for the observations
-    reconstructed_obs: Dict[str, torch.Tensor] = world_model.observation_model(latent_states)
+    reconstructed_obs: Dict[str, torch.Tensor] = world_model.observation_model(latent_states) ## Decoder
 
     # Compute the distribution over the reconstructed observations
     po = {
@@ -200,7 +214,7 @@ def train(
     world_optimizer.step()
 
     # Behaviour Learning
-    imagined_prior = posteriors.detach().reshape(1, -1, stoch_state_size)
+    imagined_prior = posteriors.detach().reshape(1, -1, stoch_state_size)               # ? wird später in imagination überschrieben ~Josch
     recurrent_state = recurrent_states.detach().reshape(1, -1, recurrent_state_size)
     imagined_latent_state = torch.cat((imagined_prior, recurrent_state), -1)
     imagined_trajectories = torch.empty(
@@ -356,12 +370,65 @@ def train(
     critic_optimizer.zero_grad(set_to_none=True)
     world_optimizer.zero_grad(set_to_none=True)
 
+    # data: Dict[str, Tensor],
+    # aggregator: MetricAggregator | None,
+    # cfg: Dict[str, Any],
+    # is_continuous: bool,
+    # actions_dim: Sequence[int],
+    # moments: Moments,
+    # episodic_memory: EM,
+def rehearsal_train(self, 
+                    fabric: Fabric,
+                    world_model: WorldModel,
+                    actor: _FabricModule,
+                    critic: _FabricModule,
+                    target_critic: torch.nn.Module,
+                    world_optimizer: Optimizer,
+                    actor_optimizer: Optimizer,
+                    critic_optimizer: Optimizer,
+                    
+                    episodic_memory: EM, 
+                    train:bool, 
+                    rehearsal_steps: int=1
+                    ):
+        for _ in range(rehearsal_steps):
+            # call self._train with data from episodic memory
+            for traj in episodic_memory.get_samples(): # [traj1, traj2, ...]
+                starting_state, transitions = traj ## (tuple, np.ndarray)
+                recurrent_state, posterior, action = starting_state
+                embedded_obs = None # TODO
+                # Keys: (h_t, z_t, a_t)
+                # Values: trajectory τ = {(z_t', a_t')}
+
+                # set starting_state for self._wm.dynamics
+                    # TODO
+                recurrent_state, posterior, _, posterior_logits, prior_logits = world_model.rssm.dynamic(
+                    posterior,
+                    recurrent_state,
+                    action,
+                    embedded_obs[i : i + 1],
+                    data["is_first"][i : i + 1],
+                )
+
+                for step_data in transitions:
+                    # execute action, get next state
+                    # prepare data dict for self._train
+                    pass
+                
+                if train:
+                    # calculate loss and backpropagate
+                        # TODO
+                        # TODO
+                    pass
+
+                # TODO: update uncertainties of this trajectory after training
+                # self._update_uncertainties(starting_state, uncvertainty)
 
 @register_algorithm()
 def main(fabric: Fabric, cfg: Dict[str, Any]):
     device = fabric.device
     rank = fabric.global_rank
-    world_size = fabric.world_size
+    world_size = fabric.world_size  ## number of processes (GPUs)?
 
     if cfg.checkpoint.resume_from:
         state = fabric.load(cfg.checkpoint.resume_from)
@@ -469,6 +536,17 @@ def main(fabric: Fabric, cfg: Dict[str, Any]):
     if fabric.is_global_zero:
         save_configs(cfg, log_dir)
 
+    ################# init EM here #################
+    episodic_memory: EM = EM(
+        trajectory_length=cfg.episodic_memory.trajectory_length,
+        uncertainty_threshold=cfg.episodic_memory.uncertainty_threshold,
+        max_elements=cfg.episodic_memory.capacity,
+        k_nn=cfg.episodic_memory.k_neighbors,
+        z_shape=cfg.algo.world_model.discrete_size,
+        h_shape=cfg.algo.world_model.recurrent_model.recurrent_state_size,
+        a_shape=actions_dim, # TODO not sure if shape is correct
+    )
+
     # Metrics
     aggregator = None
     if not MetricAggregator.disabled:
@@ -498,15 +576,19 @@ def main(fabric: Fabric, cfg: Dict[str, Any]):
         # + 1 because the checkpoint is at the end of the update step
         # (when resuming from a checkpoint, the update at the checkpoint
         # is ended and you have to start with the next one)
-        (state["iter_num"] // fabric.world_size) + 1
+        (state["iter_num"] // fabric.world_size) + 1 ### we store it with '* fabric.world_size'
         if cfg.checkpoint.resume_from
         else 1
     )
+    ### cumul env steps taken (state["iter_num"] * cfg.env.num_envs) because state["iter_num"] already with '* fabric.world_size'
     policy_step = state["iter_num"] * cfg.env.num_envs if cfg.checkpoint.resume_from else 0
     last_log = state["last_log"] if cfg.checkpoint.resume_from else 0
     last_checkpoint = state["last_checkpoint"] if cfg.checkpoint.resume_from else 0
+    ### total parallel envs, with 1 gpu and 1 env = 1
     policy_steps_per_iter = int(cfg.env.num_envs * fabric.world_size)
+    ### maximum iters, each iter 'policy_steps_per_iter' env steps are 'parallel' taken
     total_iters = int(cfg.algo.total_steps // policy_steps_per_iter) if not cfg.dry_run else 1
+    ### in which iter learning starts
     learning_starts = cfg.algo.learning_starts // policy_steps_per_iter if not cfg.dry_run else 0
     prefill_steps = learning_starts - int(learning_starts > 0)
     if cfg.checkpoint.resume_from:
@@ -546,17 +628,29 @@ def main(fabric: Fabric, cfg: Dict[str, Any]):
     step_data["is_first"] = np.ones_like(step_data["terminated"])
     player.init_states()
 
+    ### number of actual optimizer steps, how many "training" steps
+    ### cumulative_per_rank_gradient_steps: total training steps
+    ### policy_steps:                       total env steps
     cumulative_per_rank_gradient_steps = 0
+    
+    ### each iter_num, each environment makes a step
+    ### policy_step: number of total env interaction: this should be our 100k limit???
+    ### with 1 env and 1 gpu: iter_num == policy_step ?
+    ### ---------------
+    ### policy_steps_per_iter = int(cfg.env.num_envs * fabric.world_size)
+    ### so policy_steps_per_iter = total number of parallel env calls, because fabric.world_size = number of gpus??
     for iter_num in range(start_iter, total_iters + 1):
         policy_step += policy_steps_per_iter
 
+    ### handle environment interaction and replay_buffer filling
+    ###-----------------------------------
         with torch.inference_mode():
             # Measure environment interaction time: this considers both the model forward
             # to get the action given the observation and the time taken into the environment
             with timer("Time/env_interaction_time", SumMetric, sync_on_compute=False):
                 # Sample an action given the observation received by the environment
                 if (
-                    iter_num <= learning_starts
+                    iter_num <= learning_starts     ### fill replay buffer
                     and cfg.checkpoint.resume_from is None
                     and "minedojo" not in cfg.env.wrapper._target_.lower()
                 ):
@@ -569,12 +663,21 @@ def main(fabric: Fabric, cfg: Dict[str, Any]):
                             ],
                             axis=-1,
                         )
+                    h, z, uncertainty = None, None, 0.0
                 else:
+                    ## TODO: HIER MUSS NOCH WAS REIN WEIL WIR EPISODIC MEMORY HIER (auch) FILLEN
+
                     torch_obs = prepare_obs(fabric, obs, cnn_keys=cfg.algo.cnn_keys.encoder, num_envs=cfg.env.num_envs)
                     mask = {k: v for k, v in torch_obs.items() if k.startswith("mask")}
                     if len(mask) == 0:
                         mask = None
-                    real_actions = actions = player.get_actions(torch_obs, mask=mask)
+                    ## player does consist of RSSM und Actor, so lets not only return action but also the rssm stuff
+                    ################# TODO: shape stuff checken #################
+                    ### here and probably during rehearsal training, we need the (1,x) shape, but within the lookup in side the predictor (x,)
+                    ### So need to discuss how to store them, (or more, how to restore)
+                    actions, h, z, uncertainty = player.get_actions(torch_obs, mask=mask, return_rssm_stuff=True)
+                    h, z = h.cpu().numpy(), z.cpu().numpy()
+                    real_actions = actions
                     actions = torch.cat(actions, -1).cpu().numpy()
                     if is_continuous:
                         real_actions = torch.stack(real_actions, dim=-1).cpu().numpy()
@@ -586,10 +689,42 @@ def main(fabric: Fabric, cfg: Dict[str, Any]):
                 step_data["actions"] = actions.reshape((1, cfg.env.num_envs, -1))
                 rb.add(step_data, validate_args=cfg.buffer.validate_args)
 
+                ### actual interaction with the environment:
+                ### problem: interaction with batch and multi env??? so problem with our em if multiple envs at once because we can only handle one at a time.
                 next_obs, rewards, terminated, truncated, infos = envs.step(
                     real_actions.reshape(envs.action_space.shape)
                 )
                 dones = np.logical_or(terminated, truncated).astype(np.uint8)
+
+                if h is not None:
+                    ## Single action space: Discrete(6)
+                    ## Single observation space: Dict('rgb': Box(0, 255, (3, 64, 64), uint8))
+                    ## real_actions: [[[2]]]
+                    ## SHAPES:
+                    ## h: torch.Size([1, 1, 4096])
+                    ## z: torch.Size([1, 1, 1024])
+                    ## real_actions: (1, 1, 1)
+                    ## rewards:      (1,)
+                    ## dones:        (1,)
+                    # print("Single action space:", envs.single_action_space)
+                    # print("Single observation space:", envs.single_observation_space)
+                    # print(f"real_actions: {real_actions}")
+                    # print("SHAPES:")
+                    # print(f"  h: {h.shape}")
+                    # print(f"  z: {z.shape}")
+                    # print(f"  real_actions: {real_actions.shape}")
+                    # print(f"  rewards:      {rewards.shape}")
+                    # print(f"  dones:        {dones.shape}")
+                    print(episodic_memory)
+
+                ## Update Episodic Memory
+                # uncertainty = np.array([0.8])
+                episodic_memory.step(
+                    state={"deter": h, "stoch": z},
+                    action=real_actions.squeeze(0),
+                    uncertainty=uncertainty,
+                    done=dones
+                )
 
             step_data["is_first"] = np.zeros_like(step_data["terminated"])
             if "restart_on_exception" in infos:
@@ -656,10 +791,13 @@ def main(fabric: Fabric, cfg: Dict[str, Any]):
                 step_data["is_first"][:, dones_idxes] = np.ones_like(step_data["is_first"][:, dones_idxes])
                 player.init_states(dones_idxes)
 
+    ### handle dreaming interactions and training
+    ###-----------------------------------
         # Train the agent
-        if iter_num >= learning_starts:
-            ratio_steps = policy_step - prefill_steps * policy_steps_per_iter
-            per_rank_gradient_steps = ratio(ratio_steps / world_size)
+        if iter_num >= learning_starts: ### only with filled replay buffer
+            ratio_steps = policy_step - prefill_steps * policy_steps_per_iter   ### ratio_steps = how many env steps happened since training was allowed
+            ### conceptually in dreamerv3: gradient_steps = replay_ratio*env_steps, other words: how much training for each env step.
+            per_rank_gradient_steps = ratio(ratio_steps / world_size)           # per_rank_gradient_steps: weird logic, but something like: how many gradient steps to run now on each gpu
             if per_rank_gradient_steps > 0:
                 local_data = rb.sample_tensors(
                     cfg.algo.per_rank_batch_size,
@@ -694,10 +832,13 @@ def main(fabric: Fabric, cfg: Dict[str, Any]):
                             is_continuous,
                             actions_dim,
                             moments,
+                            episodic_memory
                         )
                         cumulative_per_rank_gradient_steps += 1
                     train_step += world_size
 
+    ### logging
+    ###-----------------------------------
         # Log metrics
         if cfg.metric.log_level > 0 and (policy_step - last_log >= cfg.metric.log_every or iter_num == total_iters):
             # Sync distributed metrics
