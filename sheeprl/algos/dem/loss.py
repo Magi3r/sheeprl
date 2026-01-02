@@ -86,3 +86,53 @@ def reconstruction_loss(
         observation_loss.mean(),
         continue_loss.mean(),
     )
+
+## reconstruction_loss_rehearsal
+def reconstruction_loss_rehearsal(
+    priors_logits: Tensor,
+    posteriors_logits: Tensor,
+    kl_dynamic: float = 0.5,
+    kl_representation: float = 0.1,
+    kl_free_nats: float = 1.0,
+    kl_regularizer: float = 1.0,
+) -> Tuple[Tensor, Tensor, Tensor]:
+    """
+    Compute the reconstruction loss as described in Eq. 5 in
+    [https://arxiv.org/abs/2301.04104](https://arxiv.org/abs/2301.04104).
+
+    Args:
+        priors_logits (Tensor): the logits of the prior.
+        posteriors_logits (Tensor): the logits of the posterior.
+        kl_dynamic (float): the kl-balancing dynamic loss regularizer.
+            Defaults to 0.5.
+        kl_balancing_alpha (float): the kl-balancing representation loss regularizer.
+            Defaults to 0.1.
+        kl_free_nats (float): lower bound of the KL divergence.
+            Default to 1.0.
+        kl_regularizer (float): scale factor of the KL divergence.
+            Default to 1.0.
+
+    Returns:
+        reconstruction_loss (Tensor): the value of the overall reconstruction loss.
+        KL divergence (Tensor): the KL divergence between the posterior and the prior.
+        state_loss (Tensor): the value of the state loss.
+    """
+    # KL balancing
+    dyn_loss = kl = kl_divergence(
+        Independent(OneHotCategoricalStraightThrough(logits=posteriors_logits.detach()), 1),
+        Independent(OneHotCategoricalStraightThrough(logits=priors_logits), 1),
+    )
+    free_nats = torch.full_like(dyn_loss, kl_free_nats)
+    dyn_loss = kl_dynamic * torch.maximum(dyn_loss, free_nats)
+    repr_loss = kl_divergence(
+        Independent(OneHotCategoricalStraightThrough(logits=posteriors_logits), 1),
+        Independent(OneHotCategoricalStraightThrough(logits=priors_logits.detach()), 1),
+    )
+    repr_loss = kl_representation * torch.maximum(repr_loss, free_nats)
+    kl_loss = dyn_loss + repr_loss
+    reconstruction_loss = (kl_regularizer * kl_loss).mean()
+    return (
+        reconstruction_loss,
+        kl.mean(),
+        kl_loss.mean(),
+    )

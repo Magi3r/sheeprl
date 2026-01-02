@@ -482,8 +482,8 @@ class RSSM(nn.Module):
         logits: Tensor = self.transition_model(recurrent_out)
         logits = self._uniform_mix(logits)
         return logits, compute_stochastic_state(logits, discrete=self.discrete, sample=sample_state)
-
-    def imagination(self, prior: Tensor, recurrent_state: Tensor, actions: Tensor) -> Tuple[Tensor, Tensor]:
+    
+    def imagination(self, prior: Tensor, recurrent_state: Tensor, actions: Tensor, return_logits: bool = False) -> Tuple[Tensor, Tensor]:
         """
         One-step imagination of the next latent state.
         It can be used several times to imagine trajectories in the latent space (Transition Model).
@@ -492,14 +492,17 @@ class RSSM(nn.Module):
             prior (Tensor): the prior state.
             recurrent_state (Tensor): the recurrent state of the recurrent model.
             actions (Tensor): the actions taken by the agent.
+            return_logits
 
         Returns:
             The imagined prior state (Tuple[Tensor, Tensor]): the imagined prior state.
             The recurrent state (Tensor).
         """
+        print(f"Prior: {prior.shape} | Action: {actions.shape}")
         recurrent_state = self.recurrent_model(torch.cat((prior, actions), -1), recurrent_state)
-        _, imagined_prior = self._transition(recurrent_state)
-        return imagined_prior, recurrent_state
+        imagined_prior_logits, imagined_prior = self._transition(recurrent_state)
+        
+        return (imagined_prior_logits if return_logits else imagined_prior), recurrent_state
 
 
 class DecoupledRSSM(RSSM):
@@ -679,7 +682,7 @@ class PlayerDV3(nn.Module):
 
         Returns:
             The actions the agent has to perform.
-            (optional) The recurrent state and the stochastic state.
+            (optional) The recurrent state and the stochastic state logits.
         """
         embedded_obs = self.encoder(obs)    ## (first part from Encoder of the paper)
         ### h
@@ -694,18 +697,23 @@ class PlayerDV3(nn.Module):
             ### prior_logits, prior = self.rssm._transition(self.recurrent_state)
             uncertainty = 0.99
             ### z            
-        _, self.stochastic_state = self.rssm._representation(self.recurrent_state, embedded_obs)    ## z (second part from Encoder of the paper)
+        self.z_logits, self.stochastic_state = self.rssm._representation(self.recurrent_state, embedded_obs)    ## z (second part from Encoder of the paper)
         self.stochastic_state = self.stochastic_state.view(
             *self.stochastic_state.shape[:-2], self.stochastic_size * self.discrete_size
         )
         actions, _ = self.actor(torch.cat((self.stochastic_state, self.recurrent_state), -1), greedy, mask)
         self.actions = torch.cat(actions, -1)
 
+        print("get actions: actions", actions)
+        print("get actions: self.actions", self.actions)
+
         if not return_rssm_stuff:
             return actions
         else:
-            return actions, self.recurrent_state, self.stochastic_state, uncertainty
-
+            return (actions, # tuple
+                    self.recurrent_state, 
+                    self.z_logits.view(*self.z_logits.shape[:-2], self.stochastic_size * self.discrete_size), 
+                    uncertainty)
 
 class Actor(nn.Module):
     """

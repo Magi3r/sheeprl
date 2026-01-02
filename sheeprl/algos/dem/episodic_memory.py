@@ -29,6 +29,9 @@ class EpisodicMemory():
         """Threshold for uncertainty to start a new trajectory"""
         self.key_size = h_shape # + z_shape + a_shape # TODO: will probably need to change if shapes are not 1D
         """Size of the key vector (h, z, a)"""
+        self.a_shape = a_shape
+        self.h_shape = h_shape
+        self.z_shape = z_shape
 
         self.k_nn: int = k_nn
         """Number of nearest neighbors to retrieve."""
@@ -66,11 +69,12 @@ class EpisodicMemory():
         # self.trajectories[key] = (trajectory, trajectory.last_idx(), uncertainty)
         self.trajectories[key] = [trajectory, trajectory.new_traj(), uncertainty, self.step_counter]
         
-    def __fill_traj(self, value):
+    def __fill_traj(self, value: tuple):
         """ Adds a new transition (z, a) to the current trajectory. If the trajectory becomes full, it clears current_trajectory."""
-        # value: (z_{t'}, a_{t'})
+        # value: (z_{t'}, a_{t'}) -> torch.Size([1, 1, 1024]), float (?)
         assert(self.current_trajectory is not None)
-        if self.current_trajectory.add(value) == 0:
+        z_a = np.concatenate([value[0].ravel(), value[1].ravel()]) # before: z -> torch.Size([1, 1, 1024])
+        if self.current_trajectory.add(z_a) == 0:
             self.current_trajectory = None
 
     # !! use .tobytes() for key elements
@@ -81,7 +85,7 @@ class EpisodicMemory():
         traj_obj.del_traj(idx)
         del self.trajectories[key]
 
-    def step(self, state: dict, action, uncertainty: float, done:bool=False):
+    def step(self, state: dict, action: np.ndarray, uncertainty: float, done:bool=False):
         """ Step through the memory with new transition 
         called each step :)
 
@@ -92,19 +96,35 @@ class EpisodicMemory():
         Start a new trajectory if uncertainty exceeds threshold.
         Fill the current trajectory with previous (state, action)
         Ends the trajectory and clears bookkeeping if done=True.
+
+        acion: np.ndarray containing numpy.dtypes.Int64DType
         """
         # initial step, just store. Even if uncertain dont have a key for it 
         # or if deter is None while filling replay_buffer
         if self.prev_state == None or self.prev_state["deter"] is None:
             self.prev_state = state
             return
-        
+        action = action.astype(np.float32)
         # add new trajecory
         if uncertainty > self.uncertainty_threshold:
             assert(self.prev_state is not None)
             # value = (z, h)          # (z_t, h_t)
-            key = (self.prev_state["deter"].tobytes(), self.prev_state["stoch"].tobytes(), action.tobytes())    # (z_t, h_t, a_t) # for now fatten so dict can hash it
+            print("asdfjklössssss ", action, action.tobytes()) # asdfjklössssss  [[[5]]] b'\x05\x00\x00\x00\x00\x00\x00\x00'
+            key = (self.prev_state["deter"].tobytes(), self.prev_state["stoch"].tobytes(), action.tobytes())    # (h_t, z_t, a_t) # for now fatten so dict can hash it
+
+            print("self.prev_state['stoch'].tobytes() len:", len(self.prev_state["stoch"].tobytes()))
+            print("self.prev_state['deter'].tobytes() len:", len(self.prev_state["deter"].tobytes()))
             
+            # SHAPES:
+            #   h: (1, 1, 4096)
+            #   z_logits: (1, 1024)
+            #   real_actions: (1, 1, 1)
+            #   rewards:      (1,)
+            #   dones:        (1,)
+            # EM| Num trajectories: 0| Trajectory length: 20| Uncertainty thr.: 0.9| Current trajectory: None
+            # self.prev_state['stoch'].tobytes() len: 4096
+            # self.prev_state['deter'].tobytes() len: 16384 = 4bytes * 4096
+
             if self.current_trajectory is not None:
                 self.__fill_traj((self.prev_state["stoch"], action))
             self.__create_traj(key, uncertainty)
@@ -147,23 +167,48 @@ class EpisodicMemory():
         # sample = mem.get_trajectory(offset)
         # return sample
 
-    def get_samples(self) -> list:
-        """ Return all stored trajectories as list of samples.
-            Each sample is a tuple: (starting_state, transitions)
-                starting_state: (h_t, z_t, a_t)
-                transitions: list of (z_{t'}, a_{t'})
+    def get_samples(self) -> tuple[np.array, np.array, np.array]:
         """
-        samples = []
+        Return all stored trajectories in batched form for training.
 
-        for key, val in self.trajectories:
+        Collects initial recurrent states, latent state sequences (z), and action
+        sequences (a) from all stored trajectories and stacks them into NumPy arrays.
+
+        Returns:
+            tuple:
+                - initial_h (np.ndarray): Initial recurrent states with shape
+                (num_trajectories, 4096).
+                - z_all (np.ndarray): Latent state sequences (logits) with shape
+                (trajectory_length + 1, num_trajectories, 1024).
+                - a_all (np.ndarray): Action sequences with shape
+                (trajectory_length + 1, num_trajectories, 1).
+        """
+        if len(self) == 0: return (None, None, None)
+
+        initial_h = np.zeros((1, len(self.trajectories), 4096), dtype=np.float32)
+        z_all = np.zeros((self.trajectory_length + 1, len(self.trajectories), 1024), dtype=np.float32)
+        a_all = np.zeros((self.trajectory_length + 1, len(self.trajectories), 6), dtype=np.float32)
+
+        for i, (key, val) in enumerate(self.trajectories.items()):  # val: (TrajectoryMemory, idx, uncertainty, time of birth)
+
+            # value
             traj_obj: TrajectoryObject = val[0]
             traj_nr: int = val[1]
+            trajectory: np.array = traj_obj.get_trajectory(traj_nr)
+            z_s = np.array(trajectory[:,:-6])   # ! are logits # shape (length, 1024)
+            a_s = np.array(trajectory[:,-6:])    # shape(length, 
 
-            start_state = (np.frombuffer(key[0]).reshape(1, 4096), np.frombuffer(key[1]).reshape(1, 1024), np.frombuffer(key[2]).reshap(1, 1, 1)) # The start state is in the key of the dict
-            transitions = traj_obj.get_trajectory(traj_nr)
-            samples.append((start_state, transitions))
-        
-        return samples
+            print("get samples: a_s.shape", a_s.shape)
+            print("get samples: a_all.shape", a_all.shape)
+
+            z_all[0, i] = np.frombuffer(key[1], dtype=np.float32)  # from shape (512,) into shape (1024,)
+            a_all[0, i] = np.frombuffer(key[2], dtype=np.float32) 
+            z_all[1:(z_s.shape[0]+1), i] = z_s
+            a_all[1:(z_s.shape[0]+1), i] = a_s
+            initial_h[0, i] = np.frombuffer(key[0], dtype=np.float32)#.reshape(4096)
+        # [h1, h2, ...] [zs, ...] [as, ...]
+        # batch example: [h1, h2, h3]  [zs1, zs2, zs3] [as1, as2, as3]   ####### shape(sequenz, batch, ... 32, 32)
+        return (initial_h, z_all, a_all) 
 
     # def add(self, key: tuple, value: tuple, uncertainty: float):
     #     """ Add new trajectory """
@@ -265,7 +310,7 @@ class TrajectoryObject:
         """The maximum length each trajectory will have."""
         self.free_space: int = trajectory_length
         """How much free space this object still has. Always resets if new trajectory starts."""
-        self.memory: np.array = np.empty((trajectory_length,), dtype=object)  # TODO: add size of tuple (z_t', a_t')
+        self.memory: np.array = np.empty((trajectory_length, 1030), dtype=np.float32)  # TODO: add size of tuple (z_t', a_t') ~ 1024+1
         """"The actual trajectories."""
 
         self.traj_num_to_offset : np.array = np.zeros((10,), dtype=int) # 10 is test value for now
@@ -287,7 +332,7 @@ class TrajectoryObject:
                 axis=0
             )
 
-        self.memory = np.concatenate((self.memory, np.empty((self.trajectory_length-self.free_space,), dtype=object)), axis=0) # possible if lenght-freespace = 0 ??? # TODO: add size of tuple (z_t', a_t')
+        self.memory = np.concatenate((self.memory, np.empty((self.trajectory_length-self.free_space, 1030), dtype=np.float32)), axis=0) # possible if lenght-freespace = 0 ??? # TODO: add size of tuple (z_t', a_t')
         self.free_space = self.trajectory_length
         self.traj_num_to_offset[nr_idx] = self.last_idx()
 
@@ -334,18 +379,22 @@ class TrajectoryObject:
         else:
             self.traj_num_to_offset[traj_nr] = self.traj_num_to_offset[traj_nr+1] if traj_nr + 1 < self.num_trajectories else start_idx
 
-    def add(self, value: tuple) -> int:
+    def add(self, value: np.array) -> int:
         """
         Add a value into the trajectory.
                 
-        :param value: The value to add.
+        :param value: The valuravel()
         :return: The remaining free space.
         """
         self.memory[-self.free_space] = value # TODO: add tuple (z_t', a_t')
         self.free_space -= 1
-
         # print("ADD VALUE:", value)
+        # print("memory: ", type(self.memory[0]))
+        # print(type(self.memory))
 
+        # ADD VALUE: (array([[[0., 0., 0., ..., 0., 0., 0.]]], dtype=float32), array([[2]]))
+        # memory:  <class 'numpy.ndarray'>
+        # <class 'numpy.ndarray'>
         return self.free_space
 
     def last_idx(self):
@@ -353,26 +402,26 @@ class TrajectoryObject:
 
     def __str__(self):
         return f"TrajectoryObj| Free space: {self.free_space}| Trajectory length: {self.trajectory_length} \
-| Traj num. to offset: {self.traj_num_to_offset}"
+            | Traj num. to offset: {self.traj_num_to_offset}"
     
-    def get_trajectory(self, traj_nr) -> list[np.array]:
+    def get_trajectory(self, traj_nr) -> np.array:
         """Returns a specific trajectory in full"""
         start_idx = self.traj_num_to_offset[traj_nr-1]+self.trajectory_length if traj_nr-1 >=0 else 0
         end_idx = start_idx + self.trajectory_length
+        return self.memory[start_idx:end_idx]
+    
+    # depricated
+    # def get_all_trajectories(self) -> list[np.array]:
+    #     """Return a list of all trajecotries, without indices"""
+    #     trajectories = []
 
-        return np.array(self.memory[start_idx:end_idx], dtype=object)
+    #     for traj_nr in range(self.num_trajectories):
+    #         start_idx = self.traj_num_to_offset[traj_nr-1]+self.trajectory_length if traj_nr-1 >=0 else 0
+    #         end_idx = start_idx + self.trajectory_length
 
-    def get_all_trajectories(self) -> list[np.array]:
-        """Return a list of all trajecotries, without indices"""
-        trajectories = []
-
-        for traj_nr in range(self.num_trajectories):
-            start_idx = self.traj_num_to_offset[traj_nr-1]+self.trajectory_length if traj_nr-1 >=0 else 0
-            end_idx = start_idx + self.trajectory_length
-
-            trajectories.append(np.array(self.memory[start_idx:end_idx], dtype=object))
+    #         trajectories.append(np.array(self.memory[start_idx:end_idx]))
         
-        return trajectories
+    #     return trajectories
 
 # class HybridKNN:
 #     def __init__(self, latent_tuples, w_discrete=1.0, w_cont=1.0, include_a=True):

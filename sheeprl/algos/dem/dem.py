@@ -22,8 +22,11 @@ from torch.distributions import Distribution, Independent, OneHotCategorical
 from torch.optim import Optimizer
 from torchmetrics import SumMetric
 
+
+from sheeprl.algos.dreamer_v2.utils import compute_stochastic_state
+
 from sheeprl.algos.dem.agent import WorldModel, build_agent
-from sheeprl.algos.dem.loss import reconstruction_loss
+from sheeprl.algos.dem.loss import reconstruction_loss, reconstruction_loss_rehearsal
 from sheeprl.algos.dem.utils import Moments, compute_lambda_values, prepare_obs, test
 from sheeprl.data.buffers import EnvIndependentReplayBuffer, SequentialReplayBuffer
 from sheeprl.envs.wrappers import RestartOnException
@@ -118,9 +121,8 @@ def train(
     priors_logits = torch.empty(sequence_length, batch_size, stoch_state_size, device=device)
 
     # Embed observations from the environment
-    embedded_obs = world_model.encoder(batch_obs)
-
-    ### i think we use coupled???
+    embedded_obs = world_model.encoder(batch_obs) ## embedded_obs -> torch.Size([64, 16, 12288]
+    ### i think we only use coupled???
     if cfg.algo.world_model.decoupled_rssm:
         posteriors_logits, posteriors = world_model.rssm._representation(embedded_obs)
         for i in range(0, sequence_length):
@@ -139,7 +141,6 @@ def train(
     else:
         posterior = torch.zeros(1, batch_size, stochastic_size, discrete_size, device=device)
         posteriors = torch.empty(sequence_length, batch_size, stochastic_size, discrete_size, device=device)
-        ### dreaming a sequence
         posteriors_logits = torch.empty(sequence_length, batch_size, stoch_state_size, device=device)
         for i in range(0, sequence_length):
             ### h, z, z^
@@ -213,8 +214,8 @@ def train(
         )
     world_optimizer.step()
 
-    # Behaviour Learning
-    imagined_prior = posteriors.detach().reshape(1, -1, stoch_state_size)               # ? wird später in imagination überschrieben ~Josch
+    # Behaviour Learning    ## (Actor-Critic) ~ this shoulnd be important for rehearsal training
+    imagined_prior = posteriors.detach().reshape(1, -1, stoch_state_size)               ## ? wird später in imagination überschrieben ~Josch
     recurrent_state = recurrent_states.detach().reshape(1, -1, recurrent_state_size)
     imagined_latent_state = torch.cat((imagined_prior, recurrent_state), -1)
     imagined_trajectories = torch.empty(
@@ -233,6 +234,8 @@ def train(
     actions = torch.cat(actor(imagined_latent_state.detach())[0], dim=-1)
     imagined_actions[0] = actions
 
+    print("their actions:", actions, actions.shape)
+
     # The imagination goes like this, with H=3:
     # Actions:           a'0      a'1      a'2     a'4
     #                    ^ \      ^ \      ^ \     ^
@@ -247,6 +250,15 @@ def train(
 
     # Imagine trajectories in the latent space
     for i in range(1, cfg.algo.horizon + 1):
+        # print("THEIR IMAGINATION")
+        # print("imagined_prior shape:", imagined_prior.shape)
+        # print("recurrent_state shape:", recurrent_state.shape)
+        # print("actions shape:", actions.shape)
+        # imagined_prior shape: torch.Size([1, 1024, 1024])
+        # recurrent_state shape: torch.Size([1, 1024, 4096])
+        # actions shape: torch.Size([1, 1024, 6])
+
+
         imagined_prior, recurrent_state = world_model.rssm.imagination(imagined_prior, recurrent_state, actions)
         imagined_prior = imagined_prior.view(1, -1, stoch_state_size)
         imagined_latent_state = torch.cat((imagined_prior, recurrent_state), -1)
@@ -377,52 +389,105 @@ def train(
     # actions_dim: Sequence[int],
     # moments: Moments,
     # episodic_memory: EM,
-def rehearsal_train(self, 
-                    fabric: Fabric,
-                    world_model: WorldModel,
-                    actor: _FabricModule,
-                    critic: _FabricModule,
-                    target_critic: torch.nn.Module,
-                    world_optimizer: Optimizer,
-                    actor_optimizer: Optimizer,
-                    critic_optimizer: Optimizer,
+def rehearsal_train(fabric:             Fabric,
+                    world_model:        WorldModel,
+                    world_optimizer:    Optimizer,
                     
-                    episodic_memory: EM, 
-                    train:bool, 
-                    rehearsal_steps: int=1
+                    cfg: Dict[str, Any],
+                    episodic_memory:    EM, 
+                    rehearsal_steps:    int     =1,
+                    batch_size:         int     =2
                     ):
-        for _ in range(rehearsal_steps):
-            # call self._train with data from episodic memory
-            for traj in episodic_memory.get_samples(): # [traj1, traj2, ...]
-                starting_state, transitions = traj ## (tuple, np.ndarray)
-                recurrent_state, posterior, action = starting_state
-                embedded_obs = None # TODO
-                # Keys: (h_t, z_t, a_t)
-                # Values: trajectory τ = {(z_t', a_t')}
+        # """Args:
+        #     fabric (Fabric): the fabric instance.
+        #     world_model (_FabricModule): the world model wrapped with Fabric.
+        #     world_optimizer (Optimizer): the world optimizer.
+        #     aggregator (MetricAggregator, optional): the aggregator to print the metrics.
+        #     cfg (DictConfig): the configs.
+        # ...
+        # """
 
-                # set starting_state for self._wm.dynamics
-                    # TODO
-                recurrent_state, posterior, _, posterior_logits, prior_logits = world_model.rssm.dynamic(
-                    posterior,
-                    recurrent_state,
-                    action,
-                    embedded_obs[i : i + 1],
-                    data["is_first"][i : i + 1],
-                )
+    traj_length = episodic_memory.trajectory_length     ## TODO: own trajectory length
+    recurrent_state_size = cfg.algo.world_model.recurrent_model.recurrent_state_size
+    stochastic_size = cfg.algo.world_model.stochastic_size
+    discrete_size = cfg.algo.world_model.discrete_size
+    device = fabric.device
 
-                for step_data in transitions:
-                    # execute action, get next state
-                    # prepare data dict for self._train
-                    pass
-                
-                if train:
-                    # calculate loss and backpropagate
-                        # TODO
-                        # TODO
-                    pass
+    all_recurrents_states, all_posteriors_logits, all_actions = episodic_memory.get_samples()
+    if all_recurrents_states is None: return 
+    print("get_samples types: ", all_recurrents_states.dtype, all_posteriors_logits.dtype, all_actions.dtype)
+    print("get_samples shape: ", all_recurrents_states.shape, all_posteriors_logits.shape, all_actions.shape)
+    batches: np.ndarray = None
 
-                # TODO: update uncertainties of this trajectory after training
-                # self._update_uncertainties(starting_state, uncvertainty)
+    stoch_state_size = stochastic_size * discrete_size  ## e.g. 32x32
+    # recurrent_state = torch.zeros(1, batch_size, recurrent_state_size, device=device)
+    recurrent_states = torch.empty(traj_length, batch_size, recurrent_state_size, device=device)
+    priors_logits = torch.empty(traj_length + 1, batch_size, stoch_state_size, device=device)
+
+    for i in range(0, all_recurrents_states.shape[1], batch_size):
+        j = min(batch_size, all_recurrents_states.shape[1]-i) ### (only relevant for last batch (i mean the calculation))
+        recurrent_state = torch.tensor(all_recurrents_states[:, i:i+j], device=device)
+        posteriors_logits = torch.tensor(all_posteriors_logits[:, i:i+j], device=device)
+        actions = torch.tensor(all_actions[:, i:i+j], device=device)
+
+        posteriors = compute_stochastic_state(posteriors_logits) ## torch.empty(traj_length, batch_size, stochastic_size, discrete_size, device=device)
+        posteriors = posteriors.view(*posteriors.shape[:-2], -1)
+        priors_logits[0], _ = world_model.rssm._transition(recurrent_state) # TODO: RuntimeError: The expanded size of the tensor (32) must match the existing size (1024) at non-singleton dimension 2.  Target sizes: [2, 32, 32].  Tensor sizes: [1024]
+
+        print("posteriors shape:", posteriors.shape)
+        print("posteriors_logits shape:", posteriors_logits.shape)
+        for k in range(0, traj_length):
+            ## ^z, h
+
+            print("posteriors[k] shape:", posteriors[k].shape)
+            print("recurrent_state shape:", recurrent_state.shape)
+            print("actions[k] shape:", actions[k].shape)
+
+            #### THEIR SHAPES
+                # imagined_prior shape: torch.Size([1, 1024, 1024])
+                # recurrent_state shape: torch.Size([1, 1024, 4096])
+                # actions shape: torch.Size([1, 1024, 6])
+
+            #### OURS SHAPES
+                # posteriors[k] shape: torch.Size([1, 1024])
+                # recurrent_state shape: torch.Size([1, 1, 4096])
+                # actions[k] shape: torch.Size([1, 6])
+
+            
+            imagined_prior_logits, recurrent_state = world_model.rssm.imagination(posteriors[k:k+1], recurrent_state, actions[k:k+1], return_logits=True) ## compute_stochastic_state -> from prior logits to prior
+            imagined_prior_logits = imagined_prior_logits.view(1, -1, stoch_state_size) ## TODO: do we need this?
+            # recurrent_states[i] = recurrent_state
+            priors_logits[k + 1] = imagined_prior_logits
+
+            ## TODO: UPDATE UNCERTAINTY IN EM!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!11111!!!!!!!!!!!
+
+        # Reshape posterior and prior logits to shape [B, T, 32, 32]
+        priors_logits = priors_logits.view(*priors_logits.shape[:-1], stochastic_size, discrete_size)
+        posteriors_logits = posteriors_logits.view(*posteriors_logits.shape[:-1], stochastic_size, discrete_size)
+
+        # World model optimization step. Eq. 4 in the paper
+        ## Encoder & Decoder will not be optimized, since we did not call them beforehand
+        world_optimizer.zero_grad(set_to_none=True)
+        ## world_model.encoder.zero_grad(set_to_none=True)
+        rec_loss, kl, state_loss = reconstruction_loss_rehearsal(
+            priors_logits,
+            posteriors_logits,
+            cfg.algo.world_model.kl_dynamic,
+            cfg.algo.world_model.kl_representation,
+            cfg.algo.world_model.kl_free_nats,
+            cfg.algo.world_model.kl_regularizer,
+        )
+        fabric.backward(rec_loss)
+        world_model_grads = None
+        if cfg.algo.world_model.clip_gradients is not None and cfg.algo.world_model.clip_gradients > 0:
+            world_model_grads = fabric.clip_gradients(
+                module=world_model,
+                optimizer=world_optimizer,
+                max_norm=cfg.algo.world_model.clip_gradients,
+                error_if_nonfinite=False,
+            )
+        world_optimizer.step()
+        world_optimizer.zero_grad(set_to_none=True)
 
 @register_algorithm()
 def main(fabric: Fabric, cfg: Dict[str, Any]):
@@ -513,6 +578,9 @@ def main(fabric: Fabric, cfg: Dict[str, Any]):
 
     # Optimizers
     world_optimizer = hydra.utils.instantiate(
+        cfg.algo.world_model.optimizer, params=world_model.parameters(), _convert_="all"
+    )
+    world_optimizer_no_encoder_decoder = hydra.utils.instantiate(
         cfg.algo.world_model.optimizer, params=world_model.parameters(), _convert_="all"
     )
     actor_optimizer = hydra.utils.instantiate(cfg.algo.actor.optimizer, params=actor.parameters(), _convert_="all")
@@ -663,7 +731,7 @@ def main(fabric: Fabric, cfg: Dict[str, Any]):
                             ],
                             axis=-1,
                         )
-                    h, z, uncertainty = None, None, 0.0
+                    h, z_logits, uncertainty = None, None, 0.0
                 else:
                     ## TODO: HIER MUSS NOCH WAS REIN WEIL WIR EPISODIC MEMORY HIER (auch) FILLEN
 
@@ -675,8 +743,8 @@ def main(fabric: Fabric, cfg: Dict[str, Any]):
                     ################# TODO: shape stuff checken #################
                     ### here and probably during rehearsal training, we need the (1,x) shape, but within the lookup in side the predictor (x,)
                     ### So need to discuss how to store them, (or more, how to restore)
-                    actions, h, z, uncertainty = player.get_actions(torch_obs, mask=mask, return_rssm_stuff=True)
-                    h, z = h.cpu().numpy(), z.cpu().numpy()
+                    actions, h, z_logits, uncertainty = player.get_actions(torch_obs, mask=mask, return_rssm_stuff=True)
+                    h, z_logits = h.cpu().numpy(), z_logits.cpu().numpy()
                     real_actions = actions
                     actions = torch.cat(actions, -1).cpu().numpy()
                     if is_continuous:
@@ -706,22 +774,22 @@ def main(fabric: Fabric, cfg: Dict[str, Any]):
                     ## real_actions: (1, 1, 1)
                     ## rewards:      (1,)
                     ## dones:        (1,)
-                    # print("Single action space:", envs.single_action_space)
-                    # print("Single observation space:", envs.single_observation_space)
-                    # print(f"real_actions: {real_actions}")
-                    # print("SHAPES:")
-                    # print(f"  h: {h.shape}")
-                    # print(f"  z: {z.shape}")
-                    # print(f"  real_actions: {real_actions.shape}")
-                    # print(f"  rewards:      {rewards.shape}")
-                    # print(f"  dones:        {dones.shape}")
+                    print("Single action space:", envs.single_action_space)
+                    print("Single observation space:", envs.single_observation_space)
+                    print(f"actions: {actions}")
+                    print("SHAPES:")
+                    print(f"  h: {h.shape}")
+                    print(f"  z_logits: {z_logits.shape}")
+                    print(f"  actions: {actions.shape}")
+                    print(f"  rewards:      {rewards.shape}")
+                    print(f"  dones:        {dones.shape}")
                     print(episodic_memory)
 
                 ## Update Episodic Memory
                 # uncertainty = np.array([0.8])
                 episodic_memory.step(
-                    state={"deter": h, "stoch": z},
-                    action=real_actions.squeeze(0),
+                    state={"deter": h, "stoch": z_logits},
+                    action=actions,
                     uncertainty=uncertainty,
                     done=dones
                 )
@@ -836,6 +904,15 @@ def main(fabric: Fabric, cfg: Dict[str, Any]):
                         )
                         cumulative_per_rank_gradient_steps += 1
                     train_step += world_size
+            # if TODO:
+            rehearsal_train(
+                fabric          = fabric,
+                world_model     = world_model,
+                world_optimizer = world_optimizer,
+                # aggregator      = aggregator, # add later for metric tracking
+                cfg             = cfg,
+                episodic_memory = episodic_memory
+            )
 
     ### logging
     ###-----------------------------------
