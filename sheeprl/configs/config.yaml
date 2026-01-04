@@ -56,10 +56,3 @@ cublas_workspace_config: null  # Possible values are: ":4096:8" or ":16:8"
 exp_name: ${algo.name}_${env.id}
 run_name: ${now:%Y-%m-%d_%H-%M-%S}_${exp_name}_${seed}
 root_dir: ${algo.name}/${env.id}
-
-## Episodic Memory Stuff ##
-episodic_memory:
-  trajectory_length: 20
-  capacity: 10000
-  uncertainty_threshold: 0.9
-  k_neighbors: 5

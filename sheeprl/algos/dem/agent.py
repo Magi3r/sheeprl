@@ -38,6 +38,35 @@ from sheeprl.utils.fabric import get_single_device_fabric
 from sheeprl.utils.model import ModuleType, cnn_forward
 from sheeprl.utils.utils import symlog
 
+class MCDropout(nn.Dropout):
+    """
+    Randomly randomly zeroes some of the elements of the input tensor with probability 'p'.
+
+    This happens during training and inference when enabled
+    """
+    def __init__(self, p: float = 0.5, inplace: bool = False) -> None:
+        super().__init__(p, inplace)
+        self.enabled = True
+
+    def disable(self) -> None:
+        """
+        Disables the dropout
+        """
+        self.enabled = False
+
+    def enable(self) -> None:
+        """
+        Enables the dropout
+        """
+        self.enabled = True
+
+
+    def forward(self, input: Tensor) -> Tensor:
+        """
+        Runs the forward pass.
+        With 'training' always set True when enabled, so also dropping out during inference.
+        """
+        return F.dropout(input, self.p, self.enable, self.inplace)
 
 class CNNEncoder(nn.Module):
     """The Dreamer-V3 image encoder. This is composed of 4 `nn.Conv2d` with
@@ -498,10 +527,8 @@ class RSSM(nn.Module):
             The imagined prior state (Tuple[Tensor, Tensor]): the imagined prior state.
             The recurrent state (Tensor).
         """
-        print(f"Prior: {prior.shape} | Action: {actions.shape}")
         recurrent_state = self.recurrent_model(torch.cat((prior, actions), -1), recurrent_state)
         imagined_prior_logits, imagined_prior = self._transition(recurrent_state)
-        
         return (imagined_prior_logits if return_logits else imagined_prior), recurrent_state
 
 
@@ -704,8 +731,8 @@ class PlayerDV3(nn.Module):
         actions, _ = self.actor(torch.cat((self.stochastic_state, self.recurrent_state), -1), greedy, mask)
         self.actions = torch.cat(actions, -1)
 
-        print("get actions: actions", actions)
-        print("get actions: self.actions", self.actions)
+        # print("get actions: actions", actions)
+        # print("get actions: self.actions", self.actions)
 
         if not return_rssm_stuff:
             return actions

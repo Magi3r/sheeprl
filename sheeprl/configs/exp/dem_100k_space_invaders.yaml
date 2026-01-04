@@ -13,7 +13,7 @@ seed: 5
 env:
   num_envs: 1
   max_episode_steps: 27000
-  id: FroggerNoFrameskip-v4
+  id: SpaceInvadersNoFrameskip-v4
 
 # Checkpoint
 checkpoint:

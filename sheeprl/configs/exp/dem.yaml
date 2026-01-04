@@ -3,3 +3,14 @@
 defaults:
   - dreamer_v3
   - _self_
+
+
+## Episodic Memory Stuff ##
+episodic_memory:
+  trajectory_length: 20
+  capacity: 1000
+  k_neighbors: 5
+  uncertainty_threshold: 0.9
+  prune_fraction: 0.2
+  time_to_live: 100
+  rehersal_train_every: 1000

@@ -9,6 +9,7 @@ import os
 import warnings
 from functools import partial
 from typing import Any, Dict, Sequence
+import time
 
 import gymnasium as gym
 import hydra
@@ -105,7 +106,7 @@ def train(
     recurrent_state_size = cfg.algo.world_model.recurrent_model.recurrent_state_size
     stochastic_size = cfg.algo.world_model.stochastic_size
     discrete_size = cfg.algo.world_model.discrete_size
-    device = fabric.device
+    device: torch.device = fabric.device
     batch_obs = {k: data[k] / 255.0 - 0.5 for k in cfg.algo.cnn_keys.encoder}
     batch_obs.update({k: data[k] for k in cfg.algo.mlp_keys.encoder})
     data["is_first"][0, :] = torch.ones_like(data["is_first"][0, :])
@@ -144,6 +145,7 @@ def train(
         posteriors_logits = torch.empty(sequence_length, batch_size, stoch_state_size, device=device)
         for i in range(0, sequence_length):
             ### h, z, z^
+
             recurrent_state, posterior, _, posterior_logits, prior_logits = world_model.rssm.dynamic(
                 posterior,
                 recurrent_state,
@@ -151,6 +153,17 @@ def train(
                 embedded_obs[i : i + 1],
                 data["is_first"][i : i + 1],
             )
+            # print("THEIR DYNAMICS")
+            # print("prior shape:", prior_logits.shape)
+            # print("recurrent_state shape:", recurrent_state.shape)
+            # print("actions shape:", batch_actions[i : i + 1].shape)
+            # print("post shape:", posterior.shape)
+            # # THEIR DYNAMICS
+            # # prior shape: torch.Size([1, 16, 1024])
+            # # recurrent_state shape: torch.Size([1, 16, 4096])
+            # # actions shape: torch.Size([1, 16, 9])
+            # # post shape: torch.Size([1, 16, 32, 32])
+
             recurrent_states[i] = recurrent_state
             priors_logits[i] = prior_logits
             posteriors[i] = posterior
@@ -234,7 +247,7 @@ def train(
     actions = torch.cat(actor(imagined_latent_state.detach())[0], dim=-1)
     imagined_actions[0] = actions
 
-    print("their actions:", actions, actions.shape)
+    # print("their actions:", actions, actions.shape)
 
     # The imagination goes like this, with H=3:
     # Actions:           a'0      a'1      a'2     a'4
@@ -382,13 +395,6 @@ def train(
     critic_optimizer.zero_grad(set_to_none=True)
     world_optimizer.zero_grad(set_to_none=True)
 
-    # data: Dict[str, Tensor],
-    # aggregator: MetricAggregator | None,
-    # cfg: Dict[str, Any],
-    # is_continuous: bool,
-    # actions_dim: Sequence[int],
-    # moments: Moments,
-    # episodic_memory: EM,
 def rehearsal_train(fabric:             Fabric,
                     world_model:        WorldModel,
                     world_optimizer:    Optimizer,
@@ -396,52 +402,64 @@ def rehearsal_train(fabric:             Fabric,
                     cfg: Dict[str, Any],
                     episodic_memory:    EM, 
                     rehearsal_steps:    int     =1,
-                    batch_size:         int     =2
-                    ):
-        # """Args:
-        #     fabric (Fabric): the fabric instance.
-        #     world_model (_FabricModule): the world model wrapped with Fabric.
-        #     world_optimizer (Optimizer): the world optimizer.
-        #     aggregator (MetricAggregator, optional): the aggregator to print the metrics.
-        #     cfg (DictConfig): the configs.
-        # ...
-        # """
+                    batch_size:         int     =64
+                    ) -> None:
+    """Runs rehearsal training on EM, updating the sequence and dynamics models of the WM.
+
+    Args:
+        fabric (Fabric): the fabric instance.
+        world_model (_FabricModule): the world model wrapped with Fabric.
+        world_optimizer (Optimizer): the world optimizer.
+        cfg (DictConfig): the configs.
+        episodic_memory (EM): episodic memory training samples.
+        rehearsal_steps (int): number of repeated steps using same samples.
+        # aggregator (MetricAggregator, optional): the aggregator to print the metrics.
+        batch_size (int): batch size, so number of trajectories used for training in parallel.
+    """
 
     traj_length = episodic_memory.trajectory_length     ## TODO: own trajectory length
     recurrent_state_size = cfg.algo.world_model.recurrent_model.recurrent_state_size
     stochastic_size = cfg.algo.world_model.stochastic_size
     discrete_size = cfg.algo.world_model.discrete_size
     device = fabric.device
-
+    start_time = time.time()
     all_recurrents_states, all_posteriors_logits, all_actions = episodic_memory.get_samples()
-    if all_recurrents_states is None: return 
-    print("get_samples types: ", all_recurrents_states.dtype, all_posteriors_logits.dtype, all_actions.dtype)
-    print("get_samples shape: ", all_recurrents_states.shape, all_posteriors_logits.shape, all_actions.shape)
-    batches: np.ndarray = None
+    end_time = time.time()
+    # if False:
+        # episodic_memory._prune_memory(10)
+    # print(f"Get_Samples: {(end_time - start_time)/1000} seconds")
 
+    if all_recurrents_states is None: return 
+    # print("get_samples types: ", all_recurrents_states.dtype, all_posteriors_logits.dtype, all_actions.dtype)
+    # print("get_samples shape: ", all_recurrents_states.shape, all_posteriors_logits.shape, all_actions.shape) # (1,2,4096)(...)
+    batch_size = min(batch_size, all_recurrents_states.shape[1])
     stoch_state_size = stochastic_size * discrete_size  ## e.g. 32x32
     # recurrent_state = torch.zeros(1, batch_size, recurrent_state_size, device=device)
-    recurrent_states = torch.empty(traj_length, batch_size, recurrent_state_size, device=device)
+    # recurrent_states = torch.empty(traj_length, batch_size, recurrent_state_size, device=device)
     priors_logits = torch.empty(traj_length + 1, batch_size, stoch_state_size, device=device)
-
     for i in range(0, all_recurrents_states.shape[1], batch_size):
-        j = min(batch_size, all_recurrents_states.shape[1]-i) ### (only relevant for last batch (i mean the calculation))
-        recurrent_state = torch.tensor(all_recurrents_states[:, i:i+j], device=device)
-        posteriors_logits = torch.tensor(all_posteriors_logits[:, i:i+j], device=device)
-        actions = torch.tensor(all_actions[:, i:i+j], device=device)
+        # print("rehearsal train BATCH_INDEX: ", i)
+        priors_logits = priors_logits.view(traj_length + 1, batch_size, stoch_state_size)
+        # posteriors_logits = posteriors_logits.view(*posteriors_logits.shape[:-2], stoch_state_size)
+        
+        j = min(batch_size, max(all_recurrents_states.shape[1]-i, 0)) ### (only relevant for last batch (i mean the calculation))
+        if j==0: continue
+
+        recurrent_state = torch.from_numpy(all_recurrents_states[:, i:i+j]).to(device)
+        posteriors_logits = torch.from_numpy(all_posteriors_logits[:, i:i+j]).to(device)
+        actions = torch.from_numpy(all_actions[:, i:i+j]).to(device)
 
         posteriors = compute_stochastic_state(posteriors_logits) ## torch.empty(traj_length, batch_size, stochastic_size, discrete_size, device=device)
         posteriors = posteriors.view(*posteriors.shape[:-2], -1)
-        priors_logits[0], _ = world_model.rssm._transition(recurrent_state) # TODO: RuntimeError: The expanded size of the tensor (32) must match the existing size (1024) at non-singleton dimension 2.  Target sizes: [2, 32, 32].  Tensor sizes: [1024]
+        priors_logits[0, : j], _ = world_model.rssm._transition(recurrent_state) 
 
-        print("posteriors shape:", posteriors.shape)
-        print("posteriors_logits shape:", posteriors_logits.shape)
+        # print("posteriors_logits shape:", posteriors_logits.shape)
         for k in range(0, traj_length):
             ## ^z, h
 
-            print("posteriors[k] shape:", posteriors[k].shape)
-            print("recurrent_state shape:", recurrent_state.shape)
-            print("actions[k] shape:", actions[k].shape)
+            # print("posteriors[k] shape:", posteriors[k].shape)
+            # print("recurrent_state shape:", recurrent_state.shape)
+            # print("actions[k] shape:", actions[k].shape)
 
             #### THEIR SHAPES
                 # imagined_prior shape: torch.Size([1, 1024, 1024])
@@ -453,11 +471,10 @@ def rehearsal_train(fabric:             Fabric,
                 # recurrent_state shape: torch.Size([1, 1, 4096])
                 # actions[k] shape: torch.Size([1, 6])
 
-            
             imagined_prior_logits, recurrent_state = world_model.rssm.imagination(posteriors[k:k+1], recurrent_state, actions[k:k+1], return_logits=True) ## compute_stochastic_state -> from prior logits to prior
-            imagined_prior_logits = imagined_prior_logits.view(1, -1, stoch_state_size) ## TODO: do we need this?
+            imagined_prior_logits = imagined_prior_logits.view(1, -1, stoch_state_size)
             # recurrent_states[i] = recurrent_state
-            priors_logits[k + 1] = imagined_prior_logits
+            priors_logits[k + 1, : j] = imagined_prior_logits
 
             ## TODO: UPDATE UNCERTAINTY IN EM!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!11111!!!!!!!!!!!
 
@@ -470,8 +487,8 @@ def rehearsal_train(fabric:             Fabric,
         world_optimizer.zero_grad(set_to_none=True)
         ## world_model.encoder.zero_grad(set_to_none=True)
         rec_loss, kl, state_loss = reconstruction_loss_rehearsal(
-            priors_logits,
-            posteriors_logits,
+            priors_logits[:,:j],
+            posteriors_logits[:,:j],
             cfg.algo.world_model.kl_dynamic,
             cfg.algo.world_model.kl_representation,
             cfg.algo.world_model.kl_free_nats,
@@ -487,7 +504,12 @@ def rehearsal_train(fabric:             Fabric,
                 error_if_nonfinite=False,
             )
         world_optimizer.step()
-        world_optimizer.zero_grad(set_to_none=True)
+
+        ### detach shared tensors across loop iteration, because otherwise backward unhappy
+        recurrent_state = recurrent_state.detach()
+        priors_logits = priors_logits.detach()
+
+    world_optimizer.zero_grad(set_to_none=True)
 
 @register_algorithm()
 def main(fabric: Fabric, cfg: Dict[str, Any]):
@@ -610,7 +632,9 @@ def main(fabric: Fabric, cfg: Dict[str, Any]):
         uncertainty_threshold=cfg.episodic_memory.uncertainty_threshold,
         max_elements=cfg.episodic_memory.capacity,
         k_nn=cfg.episodic_memory.k_neighbors,
-        z_shape=cfg.algo.world_model.discrete_size,
+        prune_fraction =cfg.episodic_memory.prune_fraction,
+        time_to_live = cfg.episodic_memory.time_to_live, 
+        z_shape=cfg.algo.world_model.discrete_size*cfg.algo.world_model.stochastic_size,
         h_shape=cfg.algo.world_model.recurrent_model.recurrent_state_size,
         a_shape=actions_dim, # TODO not sure if shape is correct
     )
@@ -707,11 +731,13 @@ def main(fabric: Fabric, cfg: Dict[str, Any]):
     ### ---------------
     ### policy_steps_per_iter = int(cfg.env.num_envs * fabric.world_size)
     ### so policy_steps_per_iter = total number of parallel env calls, because fabric.world_size = number of gpus??
+
     for iter_num in range(start_iter, total_iters + 1):
         policy_step += policy_steps_per_iter
 
     ### handle environment interaction and replay_buffer filling
     ###-----------------------------------
+        # start_time = time.time()
         with torch.inference_mode():
             # Measure environment interaction time: this considers both the model forward
             # to get the action given the observation and the time taken into the environment
@@ -764,7 +790,7 @@ def main(fabric: Fabric, cfg: Dict[str, Any]):
                 )
                 dones = np.logical_or(terminated, truncated).astype(np.uint8)
 
-                if h is not None:
+                # if h is not None:
                     ## Single action space: Discrete(6)
                     ## Single observation space: Dict('rgb': Box(0, 255, (3, 64, 64), uint8))
                     ## real_actions: [[[2]]]
@@ -774,16 +800,16 @@ def main(fabric: Fabric, cfg: Dict[str, Any]):
                     ## real_actions: (1, 1, 1)
                     ## rewards:      (1,)
                     ## dones:        (1,)
-                    print("Single action space:", envs.single_action_space)
-                    print("Single observation space:", envs.single_observation_space)
-                    print(f"actions: {actions}")
-                    print("SHAPES:")
-                    print(f"  h: {h.shape}")
-                    print(f"  z_logits: {z_logits.shape}")
-                    print(f"  actions: {actions.shape}")
-                    print(f"  rewards:      {rewards.shape}")
-                    print(f"  dones:        {dones.shape}")
-                    print(episodic_memory)
+                    # print("Single action space:", envs.single_action_space)
+                    # print("Single observation space:", envs.single_observation_space)
+                    # print(f"actions: {actions}")
+                    # print("SHAPES:")
+                    # print(f"  h: {h.shape}")
+                    # print(f"  z_logits: {z_logits.shape}")
+                    # print(f"  actions: {actions.shape}")
+                    # print(f"  rewards:      {rewards.shape}")
+                    # print(f"  dones:        {dones.shape}")
+                    # print(episodic_memory)
 
                 ## Update Episodic Memory
                 # uncertainty = np.array([0.8])
@@ -858,6 +884,8 @@ def main(fabric: Fabric, cfg: Dict[str, Any]):
                 step_data["truncated"][:, dones_idxes] = np.zeros_like(step_data["truncated"][:, dones_idxes])
                 step_data["is_first"][:, dones_idxes] = np.ones_like(step_data["is_first"][:, dones_idxes])
                 player.init_states(dones_idxes)
+        # end_time = time.time()
+        # print(f"env interaction: {(end_time - start_time)/1000} seconds")
 
     ### handle dreaming interactions and training
     ###-----------------------------------
@@ -875,6 +903,7 @@ def main(fabric: Fabric, cfg: Dict[str, Any]):
                     device=fabric.device,
                     from_numpy=cfg.buffer.from_numpy,
                 )
+                # start_time = time.time()
                 with timer("Time/train_time", SumMetric, sync_on_compute=cfg.metric.sync_on_compute):
                     for i in range(per_rank_gradient_steps):
                         if (
@@ -904,15 +933,21 @@ def main(fabric: Fabric, cfg: Dict[str, Any]):
                         )
                         cumulative_per_rank_gradient_steps += 1
                     train_step += world_size
+            # end_time = time.time()
+            # print(f"training per_rank_gradient_steps:{per_rank_gradient_steps}, seq_len: {cfg.algo.per_rank_sequence_length} times took {(end_time - start_time)/1000} seconds ")
             # if TODO:
-            rehearsal_train(
-                fabric          = fabric,
-                world_model     = world_model,
-                world_optimizer = world_optimizer,
-                # aggregator      = aggregator, # add later for metric tracking
-                cfg             = cfg,
-                episodic_memory = episodic_memory
-            )
+            # start_time = time.time()
+            if iter_num % cfg.episodic_memory.rehersal_train_every == 0:
+                rehearsal_train(
+                    fabric          = fabric,
+                    world_model     = world_model,
+                    world_optimizer = world_optimizer,
+                    # aggregator      = aggregator, # add later for metric tracking
+                    cfg             = cfg,
+                    episodic_memory = episodic_memory
+                )
+            # end_time = time.time()
+            # print(f"single rehearsal train took: {(end_time - start_time)/1000} seconds ~EM length: {len(episodic_memory)}")
 
     ### logging
     ###-----------------------------------
@@ -980,6 +1015,7 @@ def main(fabric: Fabric, cfg: Dict[str, Any]):
                 replay_buffer=rb if cfg.buffer.checkpoint else None,
             )
 
+    ## if training finished
     envs.close()
     if fabric.is_global_zero and cfg.algo.run_test:
         test(player, fabric, cfg, log_dir, greedy=False)
