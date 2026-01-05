@@ -38,6 +38,8 @@ from sheeprl.utils.fabric import get_single_device_fabric
 from sheeprl.utils.model import ModuleType, cnn_forward
 from sheeprl.utils.utils import symlog
 
+# from torchsummary import summary
+
 class MCDropout(nn.Dropout):
     """
     Randomly randomly zeroes some of the elements of the input tensor with probability 'p'.
@@ -720,9 +722,29 @@ class PlayerDV3(nn.Module):
             _, self.stochastic_state = self.rssm._representation(embedded_obs)
             raise NotImplementedError("DecoupledRSSM + DreamerV3 Actor not implemented yet.")
         else:
-            ### TODO: calc also ^z so we can measure the uncertainty
-            ### prior_logits, prior = self.rssm._transition(self.recurrent_state)
-            uncertainty = 0.99
+            self.rssm.transition_model.enable_mc_dropout()
+            
+            n = self.rssm.transition_model.mc_dropout_repeat 
+            batch_recurrent_state = torch.stack([self.recurrent_state] * n, dim=0)
+            ## run n-times
+            prior_logits_batch, prior_batch = self.rssm._transition(batch_recurrent_state)
+            mean = torch.mean(prior_logits_batch, dim=0)
+            std = torch.std(prior_logits_batch, dim=0)
+
+            ## calc. uncertainty
+            uncertainty = torch.mean(std).float().item()   # range: ~0.07 - 0.04
+            uncertainty = uncertainty / 0.1
+
+            # print(f"Shape Mean: {mean.shape}\n Shape Std: {std.shape}\n Logits Shape:{prior_logits_batch.shape}")
+            # print("Uncertainty", uncertainty)
+            
+            # print(f"Mean: {mean}\nStd: {std}")
+                # Shape Mean: torch.Size([1, 4096])
+                # Shape Std: torch.Size([1, 4096])
+                # Logits Shape:torch.Size([5, 1, 4096])
+
+            self.rssm.transition_model.disable_mc_dropout()
+
             ### z            
         self.z_logits, self.stochastic_state = self.rssm._representation(self.recurrent_state, embedded_obs)    ## z (second part from Encoder of the paper)
         self.stochastic_state = self.stochastic_state.view(
@@ -1084,6 +1106,8 @@ def build_agent(
             }
         ],
     )
+
+    ## Dynamics predictor ~Dropout here
     transition_ln_cls = hydra.utils.get_class(world_model_cfg.transition_model.layer_norm.cls)
     transition_model = MLP(
         input_dims=recurrent_state_size,
@@ -1099,7 +1123,14 @@ def build_agent(
                 "normalized_shape": world_model_cfg.transition_model.hidden_size,
             }
         ],
+        mc_dropout=True,
+        mc_dropout_prob=world_model_cfg.transition_model.mc_prob,
+        mc_dropout_repeat=world_model_cfg.transition_model.mc_repeat
     )
+
+    # print("\nHERE THE TRANS MODEL")
+    # summary(transition_model.cuda(), input_size=(1, recurrent_state_size))
+
 
     if cfg.algo.world_model.decoupled_rssm:
         rssm_cls = DecoupledRSSM

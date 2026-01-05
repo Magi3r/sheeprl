@@ -41,7 +41,7 @@ class EpisodicMemory():
         :param time_to_live: Time to life of trajectories (not always define the maximum, used for weighted relevancy).
         :type time_to_live: int
         """
-        self.solution()
+        # self.solution()
         self.trajectory_length: int = trajectory_length
         self.uncertainty_threshold: float = uncertainty_threshold
         self.key_size = h_shape # + z_shape + a_shape # TODO: will probably need to change if shapes are not 1D
@@ -333,8 +333,8 @@ class EpisodicMemory():
         
     #     return cloud.gather(2, knn_indices.unsqueeze(-1).repeat(1,1,1,3))
         
-    def kNN(self, key: tuple, k: int = 1):
-        """Return the k-nearest neighbors among stored trajectory keys."""
+    def kNN(self, key: tuple, k: int = 1) -> tuple[tuple, list[None, None, None, None]]:
+        """Return the k-nearest neighbors (keys + trajectories) among stored trajectory keys."""
         
         def flatten_key(k):
             z, h, a = k  # each is a torch tensor
@@ -361,9 +361,10 @@ class EpisodicMemory():
         
         # Return the actual trajectory objects
         keys = list(self.trajectories.keys())
-        neighbors = [self.trajectories[keys[i]] for i in indices[0]]
+        neighbors_keys = [keys[i] for i in indices[0]]
+        neighbors_trajecories = [self.trajectories[keys[i]] for i in indices[0]]
 
-        return neighbors
+        return (neighbors_keys, neighbors_trajecories)
 
     def solution(self, file_path="./sheeprl/algos/dem/solution.txt"):
         try:
@@ -373,6 +374,9 @@ class EpisodicMemory():
         except FileNotFoundError as e:
             pass
         
+    def update_uncertainty(self, key: tuple[None, None, None], uncertainty: float) -> None:
+        obj, idx, _, ttl = self.trajectories[key]
+        self.trajectories[key] = (obj, idx, uncertainty, ttl)
 
     # def kNN(self, key, k:int=1):
     #     # key: (h_t, z_t, a_t)

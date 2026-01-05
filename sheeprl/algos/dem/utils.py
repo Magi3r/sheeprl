@@ -12,6 +12,10 @@ from sheeprl.utils.env import make_env
 from sheeprl.utils.imports import _IS_MLFLOW_AVAILABLE
 from sheeprl.utils.utils import unwrap_fabric
 
+from sheeprl.algos.dem.episodic_memory import EpisodicMemory as EM
+from sheeprl.algos.dem.agent import WorldModel
+from sheeprl.algos.dreamer_v2.utils import compute_stochastic_state
+
 if TYPE_CHECKING:
     from mlflow.models.model import ModelInfo
 
@@ -233,3 +237,25 @@ def log_models_from_checkpoint(
         model_info["moments"] = mlflow.pytorch.log_model(moments, artifact_path="moments")
         mlflow.log_dict(cfg.to_log, "config.json")
     return model_info
+
+def additive_correction_delta(key: tuple[None, None, None], episodic_memory: EM, world_model: WorldModel, k: int) -> np.array:
+    """Calculating Additive Correction Delta (ACD)"""
+    nn_keys, nn_trajectories = episodic_memory.kNN(key, k) ## nn_keys: list[tuple[None, None, None]]
+
+    recurrent_states = None
+    prior_logits = None
+    priors = compute_stochastic_state(prior_logits) ## does this work with
+    actions = None
+
+    new_prior_logits = None # first entry of trajectory
+
+
+    ## apply world_model (Sequence + Dynamics model) on keys 
+    new_imagined_prior, new_recurrent_state = world_model.rssm.imagination(prior_logits, recurrent_states, actions)
+    ## TODO: get new_imagined_prior_logits
+
+    ## calculate additive correction delta
+        ## stuff from nn_trajectories
+    diff = new_prior_logits
+
+    return -42

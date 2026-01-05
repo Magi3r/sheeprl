@@ -23,7 +23,6 @@ from torch.distributions import Distribution, Independent, OneHotCategorical
 from torch.optim import Optimizer
 from torchmetrics import SumMetric
 
-
 from sheeprl.algos.dreamer_v2.utils import compute_stochastic_state
 
 from sheeprl.algos.dem.agent import WorldModel, build_agent
@@ -460,16 +459,7 @@ def rehearsal_train(fabric:             Fabric,
             # print("posteriors[k] shape:", posteriors[k].shape)
             # print("recurrent_state shape:", recurrent_state.shape)
             # print("actions[k] shape:", actions[k].shape)
-
-            #### THEIR SHAPES
-                # imagined_prior shape: torch.Size([1, 1024, 1024])
-                # recurrent_state shape: torch.Size([1, 1024, 4096])
-                # actions shape: torch.Size([1, 1024, 6])
-
-            #### OURS SHAPES
-                # posteriors[k] shape: torch.Size([1, 1024])
-                # recurrent_state shape: torch.Size([1, 1, 4096])
-                # actions[k] shape: torch.Size([1, 6])
+            #### THEIR SHAPES: imagined_prior shape: torch.Size([1, 1024, 1024]); recurrent_state shape: torch.Size([1, 1024, 4096]); actions shape: torch.Size([1, 1024, 6])
 
             imagined_prior_logits, recurrent_state = world_model.rssm.imagination(posteriors[k:k+1], recurrent_state, actions[k:k+1], return_logits=True) ## compute_stochastic_state -> from prior logits to prior
             imagined_prior_logits = imagined_prior_logits.view(1, -1, stoch_state_size)
@@ -759,14 +749,11 @@ def main(fabric: Fabric, cfg: Dict[str, Any]):
                         )
                     h, z_logits, uncertainty = None, None, 0.0
                 else:
-                    ## TODO: HIER MUSS NOCH WAS REIN WEIL WIR EPISODIC MEMORY HIER (auch) FILLEN
-
                     torch_obs = prepare_obs(fabric, obs, cnn_keys=cfg.algo.cnn_keys.encoder, num_envs=cfg.env.num_envs)
                     mask = {k: v for k, v in torch_obs.items() if k.startswith("mask")}
                     if len(mask) == 0:
                         mask = None
                     ## player does consist of RSSM und Actor, so lets not only return action but also the rssm stuff
-                    ################# TODO: shape stuff checken #################
                     ### here and probably during rehearsal training, we need the (1,x) shape, but within the lookup in side the predictor (x,)
                     ### So need to discuss how to store them, (or more, how to restore)
                     actions, h, z_logits, uncertainty = player.get_actions(torch_obs, mask=mask, return_rssm_stuff=True)
@@ -779,6 +766,8 @@ def main(fabric: Fabric, cfg: Dict[str, Any]):
                         real_actions = (
                             torch.stack([real_act.argmax(dim=-1) for real_act in real_actions], dim=-1).cpu().numpy()
                         )
+                    
+                    ## TODO: additive correction term
 
                 step_data["actions"] = actions.reshape((1, cfg.env.num_envs, -1))
                 rb.add(step_data, validate_args=cfg.buffer.validate_args)
@@ -789,7 +778,6 @@ def main(fabric: Fabric, cfg: Dict[str, Any]):
                     real_actions.reshape(envs.action_space.shape)
                 )
                 dones = np.logical_or(terminated, truncated).astype(np.uint8)
-
                 # if h is not None:
                     ## Single action space: Discrete(6)
                     ## Single observation space: Dict('rgb': Box(0, 255, (3, 64, 64), uint8))
@@ -813,12 +801,13 @@ def main(fabric: Fabric, cfg: Dict[str, Any]):
 
                 ## Update Episodic Memory
                 # uncertainty = np.array([0.8])
-                episodic_memory.step(
-                    state={"deter": h, "stoch": z_logits},
-                    action=actions,
-                    uncertainty=uncertainty,
-                    done=dones
-                )
+                if cfg.enable_rehersal_training:
+                    episodic_memory.step(
+                        state={"deter": h, "stoch": z_logits},
+                        action=actions,
+                        uncertainty=uncertainty,
+                        done=dones
+                    )
 
             step_data["is_first"] = np.zeros_like(step_data["terminated"])
             if "restart_on_exception" in infos:
@@ -894,6 +883,7 @@ def main(fabric: Fabric, cfg: Dict[str, Any]):
             ratio_steps = policy_step - prefill_steps * policy_steps_per_iter   ### ratio_steps = how many env steps happened since training was allowed
             ### conceptually in dreamerv3: gradient_steps = replay_ratio*env_steps, other words: how much training for each env step.
             per_rank_gradient_steps = ratio(ratio_steps / world_size)           # per_rank_gradient_steps: weird logic, but something like: how many gradient steps to run now on each gpu
+            # print("per rank gradient step: ", per_rank_gradient_steps, iter_num)
             if per_rank_gradient_steps > 0:
                 local_data = rb.sample_tensors(
                     cfg.algo.per_rank_batch_size,
@@ -936,8 +926,7 @@ def main(fabric: Fabric, cfg: Dict[str, Any]):
             # end_time = time.time()
             # print(f"training per_rank_gradient_steps:{per_rank_gradient_steps}, seq_len: {cfg.algo.per_rank_sequence_length} times took {(end_time - start_time)/1000} seconds ")
             # if TODO:
-            # start_time = time.time()
-            if iter_num % cfg.episodic_memory.rehersal_train_every == 0:
+            if cfg.enable_rehersal_training and iter_num % cfg.episodic_memory.rehersal_train_every == 0:
                 rehearsal_train(
                     fabric          = fabric,
                     world_model     = world_model,
@@ -946,7 +935,6 @@ def main(fabric: Fabric, cfg: Dict[str, Any]):
                     cfg             = cfg,
                     episodic_memory = episodic_memory
                 )
-            # end_time = time.time()
             # print(f"single rehearsal train took: {(end_time - start_time)/1000} seconds ~EM length: {len(episodic_memory)}")
 
     ### logging
@@ -963,6 +951,8 @@ def main(fabric: Fabric, cfg: Dict[str, Any]):
             fabric.log(
                 "Params/replay_ratio", cumulative_per_rank_gradient_steps * world_size / policy_step, policy_step
             )
+
+            fabric.log("Uncertanty", uncertainty, policy_step)
 
             # Sync distributed timers
             if not timer.disabled:
