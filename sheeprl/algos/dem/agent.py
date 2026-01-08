@@ -514,7 +514,7 @@ class RSSM(nn.Module):
         logits = self._uniform_mix(logits)
         return logits, compute_stochastic_state(logits, discrete=self.discrete, sample=sample_state)
     
-    def imagination(self, prior: Tensor, recurrent_state: Tensor, actions: Tensor, return_logits: bool = False) -> Tuple[Tensor, Tensor]:
+    def imagination(self, prior: Tensor, recurrent_state: Tensor, actions: Tensor, return_logits: bool = False, return_uncertainty: bool = False) -> Tuple[Tensor, Tensor]:
         """
         One-step imagination of the next latent state.
         It can be used several times to imagine trajectories in the latent space (Transition Model).
@@ -531,6 +531,32 @@ class RSSM(nn.Module):
         """
         recurrent_state = self.recurrent_model(torch.cat((prior, actions), -1), recurrent_state)
         imagined_prior_logits, imagined_prior = self._transition(recurrent_state)
+
+        ### TODO: needs testing, but should return the uncertainties, for one batch
+        ## ! in Behaviour Learning we might call this on 1024 states, so we also need to calc. 1024 uncertainties?
+        if return_uncertainty:
+            with torch.no_grad():
+                self.transition_model.enable_mc_dropout()
+                
+
+                n = self.transition_model.mc_dropout_repeat
+                # prior_logits_batch = torch.stack([self.recurrent_state] * n, dim=0)
+                prior_logits_batch = torch.zeros((n, imagined_prior_logits.shape[1], imagined_prior_logits.shape[2]))
+                ## run n-times
+                for i in range(n):
+                    prior_logits, prior_batch = self._transition(recurrent_state)
+                    prior_logits_batch[i] = prior_logits[0]
+                # mean = torch.mean(prior_logits_batch, dim=0)
+                std = torch.std(prior_logits_batch, dim=0) ### shape: ? (1, 1024, 4096) oder (1024, 4096)
+
+                ## calc. uncertainty
+                uncertainties = torch.mean(std, dim=-1).float() ### shape: ? (1024) oder (1,1024)
+                uncertainties = uncertainties / 0.1
+
+                self.transition_model.disable_mc_dropout()
+
+            return (imagined_prior_logits if return_logits else imagined_prior), recurrent_state, uncertainties
+
         return (imagined_prior_logits if return_logits else imagined_prior), recurrent_state
 
 
@@ -722,28 +748,30 @@ class PlayerDV3(nn.Module):
             _, self.stochastic_state = self.rssm._representation(embedded_obs)
             raise NotImplementedError("DecoupledRSSM + DreamerV3 Actor not implemented yet.")
         else:
-            self.rssm.transition_model.enable_mc_dropout()
-            
-            n = self.rssm.transition_model.mc_dropout_repeat 
-            batch_recurrent_state = torch.stack([self.recurrent_state] * n, dim=0)
-            ## run n-times
-            prior_logits_batch, prior_batch = self.rssm._transition(batch_recurrent_state)
-            mean = torch.mean(prior_logits_batch, dim=0)
-            std = torch.std(prior_logits_batch, dim=0)
+            ### no grad so no gradients for transision model (dont need it, dont want to trian it)
+            with torch.no_grad():
+                self.rssm.transition_model.enable_mc_dropout()
+                
+                n = self.rssm.transition_model.mc_dropout_repeat
+                batch_recurrent_state = torch.stack([self.recurrent_state] * n, dim=0)
+                ## run n-times
+                prior_logits_batch, prior_batch = self.rssm._transition(batch_recurrent_state)
+                mean = torch.mean(prior_logits_batch, dim=0)
+                std = torch.std(prior_logits_batch, dim=0)
 
-            ## calc. uncertainty
-            uncertainty = torch.mean(std).float().item()   # range: ~0.07 - 0.04
-            uncertainty = uncertainty / 0.1
+                ## calc. uncertainty
+                uncertainty = torch.mean(std).float().item()   # range: ~0.07 - 0.04
+                uncertainty = uncertainty / 0.1
 
-            # print(f"Shape Mean: {mean.shape}\n Shape Std: {std.shape}\n Logits Shape:{prior_logits_batch.shape}")
-            # print("Uncertainty", uncertainty)
-            
-            # print(f"Mean: {mean}\nStd: {std}")
-                # Shape Mean: torch.Size([1, 4096])
-                # Shape Std: torch.Size([1, 4096])
-                # Logits Shape:torch.Size([5, 1, 4096])
+                # print(f"Shape Mean: {mean.shape}\n Shape Std: {std.shape}\n Logits Shape:{prior_logits_batch.shape}")
+                # print("Uncertainty", uncertainty)
+                
+                # print(f"Mean: {mean}\nStd: {std}")
+                    # Shape Mean: torch.Size([1, 4096])
+                    # Shape Std: torch.Size([1, 4096])
+                    # Logits Shape:torch.Size([5, 1, 4096])
 
-            self.rssm.transition_model.disable_mc_dropout()
+                self.rssm.transition_model.disable_mc_dropout()
 
             ### z            
         self.z_logits, self.stochastic_state = self.rssm._representation(self.recurrent_state, embedded_obs)    ## z (second part from Encoder of the paper)

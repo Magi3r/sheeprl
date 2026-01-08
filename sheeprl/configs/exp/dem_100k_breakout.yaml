@@ -2,7 +2,7 @@
 
 defaults:
   - dem
-  - override /algo: dreamer_v3_S
+  - override /algo: dem
   - override /env: atari
   - _self_
 
@@ -12,7 +12,7 @@ seed: 5
 # Environment
 env:
   num_envs: 1
-  max_episode_steps: 27000
+  max_episode_steps: 27000 ## 432000
   id: BreakoutNoFrameskip-v4
 
 # Checkpoint

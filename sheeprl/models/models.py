@@ -13,6 +13,37 @@ from torch import Tensor, nn
 from sheeprl.utils.model import ArgsType, ModuleType, cnn_forward, create_layers, miniblock
 
 
+class MCDropout(nn.Dropout):
+    """
+    Randomly randomly zeroes some of the elements of the input tensor with probability 'p'.
+
+    This happens during training and inference when enabled
+    """
+    def __init__(self, p: float = 0.5, inplace: bool = False) -> None:
+        super().__init__(p, inplace)
+        self.enabled = True
+
+    def disable(self) -> None:
+        """
+        Disables the dropout
+        """
+        self.enabled = False
+
+    def enable(self) -> None:
+        """
+        Enables the dropout
+        """
+        self.enabled = True
+
+
+    def forward(self, input: Tensor) -> Tensor:
+        """
+        Runs the forward pass.
+        With 'training' always set True when enabled, so also dropping out during inference.
+        """
+        return F.dropout(input, self.p, self.enabled, self.inplace)
+
+
 class MLP(nn.Module):
     """Simple MLP backbone.
 
@@ -56,6 +87,9 @@ class MLP(nn.Module):
         activation: Optional[Union[ModuleType, Sequence[ModuleType]]] = nn.ReLU,
         act_args: Optional[ArgsType] = None,
         flatten_dim: Optional[int] = None,
+        mc_dropout: Optional[bool] = None,
+        mc_dropout_prob: Optional[float] = None,
+        mc_dropout_repeat: Optional[int] = None
     ) -> None:
         super().__init__()
         num_layers = len(hidden_sizes)
@@ -93,8 +127,16 @@ class MLP(nn.Module):
             act_args_list,
         ):
             model += miniblock(in_dim, out_dim, nn.Linear, l_args, drop, drop_args, norm, norm_args, activ, act_args)
+
+        ## TODO: add dropout layer after output layer? here?
+        if mc_dropout:
+            self._mc_dropout_prob = mc_dropout_prob
+            model += [MCDropout(mc_dropout_prob)]
+            self.mc_dropout_repeat = mc_dropout_repeat
+
         if output_dim is not None:
             model += [nn.Linear(hidden_sizes[-1], output_dim)]
+
 
         self._output_dim = output_dim or hidden_sizes[-1]
         self._model = nn.Sequential(*model)
@@ -117,6 +159,16 @@ class MLP(nn.Module):
         if self.flatten_dim is not None:
             obs = obs.flatten(self.flatten_dim)
         return self.model(obs)
+
+    def enable_mc_dropout(self):
+        for module in self._model.modules():
+            if isinstance(module, MCDropout):
+                module.enable()
+
+    def disable_mc_dropout(self):
+        for module in self._model.modules():
+            if isinstance(module, MCDropout):
+                module.disable()
 
 
 class CNN(nn.Module):

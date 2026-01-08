@@ -48,6 +48,7 @@ import pkgutil
 # import os
 # os.environ["HYDRA_FULL_ERROR"] = "1"
 
+from sheeprl.algos.dem.utils import additive_correction_delta
 from sheeprl.algos.dem.episodic_memory import EpisodicMemory as EM
 
 # Decomment the following two lines if you cannot start an experiment with DMC environments
@@ -226,6 +227,7 @@ def train(
         )
     world_optimizer.step()
 
+    print("Behaviour Learning ~Actor-Critic stuff")
     # Behaviour Learning    ## (Actor-Critic) ~ this shoulnd be important for rehearsal training
     imagined_prior = posteriors.detach().reshape(1, -1, stoch_state_size)               ## ? wird später in imagination überschrieben ~Josch
     recurrent_state = recurrent_states.detach().reshape(1, -1, recurrent_state_size)
@@ -270,13 +272,54 @@ def train(
         # recurrent_state shape: torch.Size([1, 1024, 4096])
         # actions shape: torch.Size([1, 1024, 6])
 
+        ### TODO: do stuff with uncertainties, should be (1024), of (1, 1024) but needs testing.
+        # start = time.perf_counter_ns()
 
-        imagined_prior, recurrent_state = world_model.rssm.imagination(imagined_prior, recurrent_state, actions)
-        imagined_prior = imagined_prior.view(1, -1, stoch_state_size)
+        return_uncertainty = True
+        if return_uncertainty: uncertainties = np.random.rand(1024)
+
+        imagined_prior, recurrent_state, uncertainties = world_model.rssm.imagination(imagined_prior, recurrent_state, actions, return_uncertainty = return_uncertainty)
+        # imagined_prior, recurrent_state = world_model.rssm.imagination(imagined_prior, recurrent_state, actions, return_uncertainty = return_uncertainty)
+        # print(f"imag duration: {time.perf_counter_ns()- start}ns")
+
+        imagined_prior = imagined_prior.view(1, -1, stoch_state_size)   ## should be sahep of: (1, :) , 32)
         imagined_latent_state = torch.cat((imagined_prior, recurrent_state), -1)
         imagined_trajectories[i] = imagined_latent_state
         actions = torch.cat(actor(imagined_latent_state.detach())[0], dim=-1)
         imagined_actions[i] = actions
+
+        ## TODO: ACD stuff here?
+        ## TODO: BATCHING NEEDED FOR 1024 STUFF?
+        # Create a boolean mask based on the uncertainty array
+        if return_uncertainty:
+            k: int = cfg.episodic_memory.k_neighbors
+            # print("\nSHAPES:")
+            # mask = uncertainties > cfg.episodic_memory.read_threshold_last_N
+            # print(" mask", mask.shape)
+            # uncertain_recurrent_state   = torch.where(
+            #                                 (uncertainties > cfg.episodic_memory.read_threshold_last_N)[:, None],
+            #                                 lambda h, z, a : (
+            #                                     key: tuple = (h[i], z[i], a[i])
+            #                                     additive_correction_delta(key, )
+            #                                 ),
+            #                                 (uncertain_recurrent_state, uncertain_imagined_prior, uncertain_action)
+            #                             )
+            # uncertain_imagined_prior    = imagined_prior[0, mask[:, None], :]
+            # uncertain_action            = actions[0, mask[:, None], :]
+            # print(" uncertain_recurrent_state", uncertain_recurrent_state.shape)
+
+            # def func(key):
+            #     key: tuple = (h, z, a)
+            #     acd: float = additive_correction_delta(key, episodic_memory, world_model, k)
+            #     return acd
+
+            #########################
+            print("\n before ACD check")
+            for i in range(recurrent_state.shape[1]): # loop over all 1024
+                if uncertainties[i] > cfg.episodic_memory.read_threshold_last_N: ##  TODO: hier kommen wa nie rein :)
+                    print("\nCALCULATE ACD SOOONNNNN")
+                    key: tuple = (recurrent_state[i], imagined_prior[i], actions[i])
+                    acd: float = additive_correction_delta(key, episodic_memory, world_model, k)
 
     # Predict values, rewards and continues
     predicted_values = TwoHotEncodingDistribution(critic(imagined_trajectories), dims=1).mean
@@ -440,7 +483,7 @@ def rehearsal_train(fabric:             Fabric,
         # print("rehearsal train BATCH_INDEX: ", i)
         priors_logits = priors_logits.view(traj_length + 1, batch_size, stoch_state_size)
         # posteriors_logits = posteriors_logits.view(*posteriors_logits.shape[:-2], stoch_state_size)
-        
+
         j = min(batch_size, max(all_recurrents_states.shape[1]-i, 0)) ### (only relevant for last batch (i mean the calculation))
         if j==0: continue
 
@@ -450,7 +493,7 @@ def rehearsal_train(fabric:             Fabric,
 
         posteriors = compute_stochastic_state(posteriors_logits) ## torch.empty(traj_length, batch_size, stochastic_size, discrete_size, device=device)
         posteriors = posteriors.view(*posteriors.shape[:-2], -1)
-        priors_logits[0, : j], _ = world_model.rssm._transition(recurrent_state) 
+        priors_logits[0, : j], _ = world_model.rssm._transition(recurrent_state)
 
         # print("posteriors_logits shape:", posteriors_logits.shape)
         for k in range(0, traj_length):
@@ -506,6 +549,10 @@ def main(fabric: Fabric, cfg: Dict[str, Any]):
     device = fabric.device
     rank = fabric.global_rank
     world_size = fabric.world_size  ## number of processes (GPUs)?
+
+    ### stores last uncertainty values to calculate avg. and adapt treshold
+    last_N_env_uncertainties = np.zeros((cfg.episodic_memory.write_threshold_last_N), dtype = np.float32)
+    last_N_dream_uncertainties = np.zeros((cfg.episodic_memory.read_threshold_last_N), dtype = np.float32)
 
     if cfg.checkpoint.resume_from:
         state = fabric.load(cfg.checkpoint.resume_from)
@@ -768,6 +815,11 @@ def main(fabric: Fabric, cfg: Dict[str, Any]):
                         )
                     
                     ## TODO: additive correction term
+                    ## additive_correction_delta()
+                ### update ems uncertainty treshold
+                last_N_env_uncertainties[iter_num % last_N_env_uncertainties.shape[0]] = uncertainty
+                em_insert_threshold = np.percentile(last_N_env_uncertainties, cfg.episodic_memory.percentile_treshold)
+                episodic_memory.set_threshold(em_insert_threshold)
 
                 step_data["actions"] = actions.reshape((1, cfg.env.num_envs, -1))
                 rb.add(step_data, validate_args=cfg.buffer.validate_args)
@@ -925,7 +977,6 @@ def main(fabric: Fabric, cfg: Dict[str, Any]):
                     train_step += world_size
             # end_time = time.time()
             # print(f"training per_rank_gradient_steps:{per_rank_gradient_steps}, seq_len: {cfg.algo.per_rank_sequence_length} times took {(end_time - start_time)/1000} seconds ")
-            # if TODO:
             if cfg.enable_rehersal_training and iter_num % cfg.episodic_memory.rehersal_train_every == 0:
                 rehearsal_train(
                     fabric          = fabric,
@@ -953,6 +1004,7 @@ def main(fabric: Fabric, cfg: Dict[str, Any]):
             )
 
             fabric.log("Uncertanty", uncertainty, policy_step)
+            fabric.log("EM_Insert_Treshold", em_insert_threshold, policy_step)
 
             # Sync distributed timers
             if not timer.disabled:

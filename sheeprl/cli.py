@@ -358,7 +358,7 @@ def check_configs_evaluation(cfg: DictConfig):
 @hydra.main(version_base="1.3", config_path="configs", config_name="config")
 def run(cfg: DictConfig):
     """SheepRL zero-code command line utility."""
-    print_config(cfg)
+    # print_config(cfg)
     if cfg.checkpoint.resume_from:
         cfg = resume_from_checkpoint(cfg)
     cfg = dotdict(OmegaConf.to_container(cfg, resolve=True, throw_on_missing=True))

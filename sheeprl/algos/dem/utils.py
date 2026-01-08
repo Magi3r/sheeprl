@@ -238,24 +238,54 @@ def log_models_from_checkpoint(
         mlflow.log_dict(cfg.to_log, "config.json")
     return model_info
 
-def additive_correction_delta(key: tuple[None, None, None], episodic_memory: EM, world_model: WorldModel, k: int) -> np.array:
+def additive_correction_delta(key: tuple[None, None, None], episodic_memory: EM, world_model: WorldModel, k: int) -> float:
     """Calculating Additive Correction Delta (ACD)"""
-    nn_keys, nn_trajectories = episodic_memory.kNN(key, k) ## nn_keys: list[tuple[None, None, None]]
+    if len(episodic_memory) == 0:
+        return 0
+    nn_keys, nn_trajectories = episodic_memory.kNN(key, k)
+    ## from key:        recurrent_states, prior_logits, actions
+    ## from trajectory: trajectory_starts = next_prior_logits, _ = z_t1, a_t1
 
-    recurrent_states = None
-    prior_logits = None
-    priors = compute_stochastic_state(prior_logits) ## does this work with
-    actions = None
+    # print("nn_keys shape:", nn_keys.shape)          # (k, 5128)
+    ## TODO:hardcoded
+    h_size = 4096
+    z_size = 1024
+    a_size = 8
 
-    new_prior_logits = None # first entry of trajectory
+    recurrent_states = nn_keys[:, :h_size]          ## (k, 4096)
+    prior_logits = nn_keys[:, h_size:h_size+z_size] ## (k, 1024)
+    prior_logits = torch.from_numpy(prior_logits).unsqueeze(0) ## (k, 1024).unsqueeze(0) -> (1, k, 1024)
+    actions = nn_keys[:, h_size+z_size:]            ## (k, 8)
+    priors = compute_stochastic_state(prior_logits).squeeze(0).numpy() ## torch.Size([1, k, 32, 32]); 1 = only single sample, not a entire trajectory
+    # priors = priors.view(*priors.shape[:-2], -1)
+    
+    # print("recurrent_states shape: ", recurrent_states.shape)
+    # print("prior_logits shape: ", prior_logits.shape)
+    # print("actions shape: ", actions.shape)
+    # print("priors shape", priors.shape)
 
+    n = k ## should be = nn_keys.shape[0]
+    z_size = prior_logits.shape[1]       ## TODO [0] necessary?
+    a_size = actions.shape[1]   ## TODO [0] necessary?
 
-    ## apply world_model (Sequence + Dynamics model) on keys 
-    new_imagined_prior, new_recurrent_state = world_model.rssm.imagination(prior_logits, recurrent_states, actions)
-    ## TODO: get new_imagined_prior_logits
+    # print(f"n: {n}; z_size: {z_size}; a_size: {a_size}")
+
+    trajectory_starts = np.array([traj_obj.get_trajectory(idx)[0] for traj_obj, idx, _, _ in nn_trajectories])##.reshape(n, z_size + a_size)
+
+    # print("trajectory_starts shape: ", trajectory_starts.shape)
+
+    next_prior_logits = trajectory_starts[:, :z_size]                             ## from trajectory
+    print("next_prior_logits shape: ", next_prior_logits.shape)
+
+    ## apply world_model (Sequence + Dynamics model) on keys
+    next_imagined_prior_logits, _ = world_model.rssm.imagination(prior_logits, recurrent_states, actions, return_logits=True)
+    # next_imagined_priors = compute_stochastic_state(next_imagined_prior_logits.unsqueeze(0)).squeeze(0) ## we dont need this
+
+    ## TODO: are these shapes good/correct?
 
     ## calculate additive correction delta
-        ## stuff from nn_trajectories
-    diff = new_prior_logits
+    diff = next_prior_logits - next_imagined_prior_logits
 
-    return -42
+    acd = diff.mean(axis=0)
+
+    return acd

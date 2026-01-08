@@ -71,6 +71,9 @@ class EpisodicMemory():
         # print(f"init EM with following shapes: z:{z_shape}, h:{h_shape}, a:{a_shape}, key_size: {self.key_size}")
         warnings.warn("EpisodicMemory currently only works with a single environment instance!")
 
+    def set_threshold(self, uncertainty_threshold: float =  0.9):
+        self.uncertainty_threshold = uncertainty_threshold
+
     def __len__(self):
         return len(self.trajectories)
 
@@ -205,7 +208,6 @@ class EpisodicMemory():
                 z_all (np.ndarray): Latent state sequences (logits) with shape (trajectory_length + 1, num_trajectories, 1024).
                 a_all (np.ndarray): Action sequences with shape (trajectory_length + 1, num_trajectories, 1).
         """
-        # TODO: hardcoded shapes!!!
         if len(self) == 0: return (None, None, None)
 
         ## Ones for non-invalid probability tensors
@@ -219,7 +221,6 @@ class EpisodicMemory():
             traj_obj: TrajectoryObject = val[0]
             traj_nr: int = val[1]
             trajectory: np.array = traj_obj.get_trajectory(traj_nr)
-            
 
             # single rehearsal train took: 1.9778013229370117e-05 seconds ~EM length: 5
             # training per_rank_gradient_steps:1, seq_len: 64 times took 0.0007024538516998291 seconds 
@@ -263,13 +264,12 @@ class EpisodicMemory():
 
     #     trajectory.add(value)
 
-    def _flatten_key(self, k: torch.Tensor):
-        z, h, a = k  # each is a torch tensor
-        z = z.detach().cpu().numpy().flatten()
-        h = h.detach().cpu().numpy().flatten()
-        a = a.detach().cpu().numpy().flatten()
+    def _flatten_key(self, key: np.ndarray):
+        h = np.frombuffer(key[0], dtype=np.float32).flatten()
+        z = np.frombuffer(key[1], dtype=np.float32).flatten()  # from shape (512,) into shape (1024,)
+        a = np.frombuffer(key[2], dtype=np.float32).flatten()
 
-        res = np.concatenate([z, h, a])
+        res = np.concatenate([h, z, a])
         return res
 
     def _init_hnsw(self, max_elements, dim, rebuild=False):
@@ -281,7 +281,7 @@ class EpisodicMemory():
         self.hnsw_storage.set_ef(50)
         if rebuild:
             assert(max_elements>=len(self.trajectories))
-            keys = np.array(list(map(lambda x: self._flatten_key(x).reshape(1, -1), self.trajectories.keys())))
+            keys = np.array(list(map(lambda x: self._flatten_key(x), self.trajectories.keys())))
             self.hnsw_storage.add_items(keys)
 
     def _prune_memory(self, prune_fraction: float, uncertainty_weight: float = 0.5, time_to_live_weight: float = 0.5) -> None:
@@ -319,7 +319,7 @@ class EpisodicMemory():
     def _add_hnsw(self, key):
         if self.hnsw_storage.get_current_count() == self.hnsw_storage.get_max_elements():
             print("Problem")
-        key = np.array([self._flatten_key(key).reshape(1, -1)])
+        key = np.array([self._flatten_key(key)])
         self.hnsw_storage.add_items(key)
         
     # def kNN(cloud: torch.Tensor, center: torch.Tensor, k: int = 1): # cloud: 4 dims (batch, x, y, z); center: 3 dims (x,y,z)
@@ -332,36 +332,42 @@ class EpisodicMemory():
     #     knn_indices = dist.topk(k, largest=False, sorted=False)[1]
         
     #     return cloud.gather(2, knn_indices.unsqueeze(-1).repeat(1,1,1,3))
-        
-    def kNN(self, key: tuple, k: int = 1) -> tuple[tuple, list[None, None, None, None]]:
-        """Return the k-nearest neighbors (keys + trajectories) among stored trajectory keys."""
-        
-        def flatten_key(k):
-            z, h, a = k  # each is a torch tensor
-            z = z.detach().cpu().numpy().flatten()
-            h = h.detach().cpu().numpy().flatten()
-            a = a.detach().cpu().numpy().flatten()
 
-            res = np.concatenate([z, h, a])
-            return res
-        
+
+    def kNN(self, key: tuple, k: int = 1) -> tuple[list[tuple[None, None, None]], list[None, None, None, None]]:
+        """Return the k-NearestNeighbors (keys + trajectories) among stored trajectory keys.
+
+            Returns:
+                neighbors_keys: np.array[np.array[]] -> actual values, not the bytes anymore
+                neighbors_trajecories: TODO
+        """
+
         from sklearn.neighbors import NearestNeighbors
         import numpy as np
         key_array = list(self.trajectories.keys())
         assert(len(key_array) > 0), "No trajectories stored in EpisodicMemory."
-        search_space = np.stack([flatten_key(key) for key in key_array])  # shape: (N, D)
 
-        x = flatten_key(key).reshape(1, -1)
+        search_space = np.concatenate([self._flatten_key(key).reshape(1,-1) for key in key_array])  # shape: (N, D)
+
+        x = self._flatten_key(key).reshape(1,-1)
         knn = NearestNeighbors(
             n_neighbors=k,
             metric="euclidean"  # or cosine, mahalanobis, etc.
         ).fit(search_space)
 
         distances, indices = knn.kneighbors(x) # [None]
-        
+
         # Return the actual trajectory objects
         keys = list(self.trajectories.keys())
-        neighbors_keys = [keys[i] for i in indices[0]]
+
+        neighbors_keys = np.array([
+            np.concatenate([
+                np.frombuffer(keys[i][0], dtype=np.float32),
+                np.frombuffer(keys[i][1], dtype=np.float32),
+                np.frombuffer(keys[i][2], dtype=np.float32),
+            ]) for i in indices[0]
+        ])
+        # TODO: maybe only return first transition in each trajectory
         neighbors_trajecories = [self.trajectories[keys[i]] for i in indices[0]]
 
         return (neighbors_keys, neighbors_trajecories)
@@ -501,9 +507,9 @@ class TrajectoryObject:
                 else:
                     new_length = 1
                 self.traj_num_mapping.delete(traj_nr)
-                        
-                self.free_space = max(0, self.last_idx() - start_idx)                
-        
+
+                self.free_space = max(0, self.last_idx() - start_idx)
+
         elif to_delete == 0:
             pass
 
