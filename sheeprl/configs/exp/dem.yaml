@@ -14,9 +14,32 @@ episodic_memory:
   time_to_live: 100
   rehersal_train_every: 512
   enable_rehersal_training: true
-  write_threshold_last_N: 128
-  read_threshold_last_N: 128
-  percentile_treshold: 90
+
+  ### legacy, will remove if nothings breaks ###
+  # read_threshold_last_N: 128
+  # percentile_treshold: 90
+  # write_uncertainty_windows_size: 128 
+  # read_std_multiplier: 1.0
+  # write_std_multiplier: 1.0
+  ###--------------------------------###
+
+  # configure dynamic thresholds
+  # moving average for inserting, as we only get one single uncertainty per real env step
+  # exponential moving average for reading, as we get multiple uncertainties per dreaming step and not only a single interaction per step
+  # so would be more complicated to track
+  read_exp_mov_avg_alpha: 0.99    # moving average alpha for read threshold (inside dreaming [when to read from em])
+  write_window_size_N: 128        # window size N for write threshold moving average (env interactions [when to write to em])
+
+  read_std_multiplier_start: 1.0  # initial multiplier for read threshold std
+  read_std_multiplier_max: 1.0    # final multiplier for read threshold std
+  read_std_inc_factor: 1.001      # exponential increase factor for read threshold std
+  read_std_inc_start_at_ep: 900   # in which episode to start increasing read std multiplier
+  write_std_multiplier_start: 1.0 # initial multiplier for write threshold std
+  write_std_multiplier_max: 1.0   # final multiplier for write threshold std
+  write_std_inc_factor: 1.001     # exponential increase factor for write threshold std
+  write_std_inc_start_at_ep: 900  # in which to start increasing write std multiplier
+  # ---------------------------------###
+
 # Algorithm
 algo:
   replay_ratio: 1

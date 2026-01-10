@@ -532,30 +532,33 @@ class RSSM(nn.Module):
         recurrent_state = self.recurrent_model(torch.cat((prior, actions), -1), recurrent_state)
         imagined_prior_logits, imagined_prior = self._transition(recurrent_state)
 
+        # print("recurrent_state shape: ", recurrent_state.shape)           
+        # print("imagined_prior_logits shape: ", imagined_prior_logits.shape)  
         ### TODO: needs testing, but should return the uncertainties, for one batch
         ## ! in Behaviour Learning we might call this on 1024 states, so we also need to calc. 1024 uncertainties?
-        if return_uncertainty:
+        if return_uncertainty:   
             with torch.no_grad():
                 self.transition_model.enable_mc_dropout()
                 
-
                 n = self.transition_model.mc_dropout_repeat
-                # prior_logits_batch = torch.stack([self.recurrent_state] * n, dim=0)
-                prior_logits_batch = torch.zeros((n, imagined_prior_logits.shape[1], imagined_prior_logits.shape[2]))
+                # batch_recurrent_state = torch.stack([recurrent_state] * n, dim=0)
+                batch_recurrent_state = recurrent_state.repeat(n, 1, 1)
                 ## run n-times
-                for i in range(n):
-                    prior_logits, prior_batch = self._transition(recurrent_state)
-                    prior_logits_batch[i] = prior_logits[0]
-                # mean = torch.mean(prior_logits_batch, dim=0)
-                std = torch.std(prior_logits_batch, dim=0) ### shape: ? (1, 1024, 4096) oder (1024, 4096)
+                prior_logits_batch, prior_batch = self._transition(batch_recurrent_state)
+                # print("batch_recurrent_state shape: ", batch_recurrent_state.shape)      
+                # print("prior_logits_batch shape: ", prior_logits_batch.shape)  
+                mean = torch.mean(prior_logits_batch, dim=0)
+                std = torch.std(prior_logits_batch, dim=0)
 
                 ## calc. uncertainty
-                uncertainties = torch.mean(std, dim=-1).float() ### shape: ? (1024) oder (1,1024)
-                uncertainties = uncertainties / 0.1
+                uncertainty = torch.mean(std, dim = -1).float()#   # range: ~0.07 - 0.04
+                uncertainty = uncertainty / 0.1
+
+
 
                 self.transition_model.disable_mc_dropout()
 
-            return (imagined_prior_logits if return_logits else imagined_prior), recurrent_state, uncertainties
+            return (imagined_prior_logits if return_logits else imagined_prior), recurrent_state, uncertainty
 
         return (imagined_prior_logits if return_logits else imagined_prior), recurrent_state
 

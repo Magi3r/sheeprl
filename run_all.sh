@@ -11,5 +11,5 @@ games=(
 )
 
 for item in "${games[@]}"; do
-    ./run.sh $item "1"
+    ./run.sh $item "0"
 done

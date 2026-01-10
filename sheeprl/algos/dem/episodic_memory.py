@@ -2,7 +2,7 @@ import numpy as np
 import hnswlib
 from torch.utils.data import Dataset, DataLoader
 import torch
-from sklearn.neighbors import KNeighborsClassifier
+from sklearn.neighbors import NearestNeighbors
 import warnings
 from lightning.fabric import Fabric
 from sortedcontainers import SortedSet
@@ -60,11 +60,16 @@ class EpisodicMemory():
 
         self.hnsw_storage: hnswlib.Index = None
         self._init_hnsw(max_elements=max_elements*2, dim = 32*32+512+6) # TODO: insert shapes properly hier error?
-        self.step_counter = 0
+        self.step_counter: int = 0
         self.max_elements: int = max_elements
         # pruning stuff
         self.prune_fraction: int = prune_fraction
         self.time_to_live = time_to_live
+
+        self.kNN_rebuild_needed: bool = True            ## if NearestNeighbors object needs to be rebuild (due to change in keys)
+        self.kNN_obj: NearestNeighbors | None = None    ## NearestNeighbors object (scikit-learn oder so)
+        self.key_vectors: np.array = np.empty([1])      ## array containing all keys as flatted
+        self.key_array: list = []                       ## list containing all keys (this bytes shit)
 
         self.device: torch.device = fabric.device if fabric is not None else torch.device("cpu")
 
@@ -264,10 +269,15 @@ class EpisodicMemory():
 
     #     trajectory.add(value)
 
-    def _flatten_key(self, key: np.ndarray):
-        h = np.frombuffer(key[0], dtype=np.float32).flatten()
-        z = np.frombuffer(key[1], dtype=np.float32).flatten()  # from shape (512,) into shape (1024,)
-        a = np.frombuffer(key[2], dtype=np.float32).flatten()
+    def _flatten_key(self, key: np.ndarray, from_bytes: bool = False):
+        if from_bytes:
+            h = np.frombuffer(key[0], dtype=np.float32).flatten()
+            z = np.frombuffer(key[1], dtype=np.float32).flatten()  # from shape (512,) into shape (1024,)
+            a = np.frombuffer(key[2], dtype=np.float32).flatten()
+        else:
+            h = key[0].flatten() ## TODO: flatten needed here??
+            z = key[1].flatten()
+            a = key[2].flatten()
 
         res = np.concatenate([h, z, a])
         return res
@@ -281,7 +291,7 @@ class EpisodicMemory():
         self.hnsw_storage.set_ef(50)
         if rebuild:
             assert(max_elements>=len(self.trajectories))
-            keys = np.array(list(map(lambda x: self._flatten_key(x), self.trajectories.keys())))
+            keys = np.array(list(map(lambda x: self._flatten_key(x, from_bytes=True), self.trajectories.keys())))
             self.hnsw_storage.add_items(keys)
 
     def _prune_memory(self, prune_fraction: float, uncertainty_weight: float = 0.5, time_to_live_weight: float = 0.5) -> None:
@@ -319,7 +329,7 @@ class EpisodicMemory():
     def _add_hnsw(self, key):
         if self.hnsw_storage.get_current_count() == self.hnsw_storage.get_max_elements():
             print("Problem")
-        key = np.array([self._flatten_key(key)])
+        key = np.array([self._flatten_key(key, from_bytes=True)])
         self.hnsw_storage.add_items(key)
         
     # def kNN(cloud: torch.Tensor, center: torch.Tensor, k: int = 1): # cloud: 4 dims (batch, x, y, z); center: 3 dims (x,y,z)
@@ -332,45 +342,68 @@ class EpisodicMemory():
     #     knn_indices = dist.topk(k, largest=False, sorted=False)[1]
         
     #     return cloud.gather(2, knn_indices.unsqueeze(-1).repeat(1,1,1,3))
+    def buildKNN(self):
+        """Building internal kNN object to prevent always rebuilding when multithreaded"""
+        if self.kNN_rebuild_needed:
+            self.kNN_rebuild_needed = False
+            
+            self.key_array = list(self.trajectories.keys())
+            self.key_vectors = np.stack([
+                np.concatenate([
+                    np.frombuffer(k[0], dtype=np.float32),
+                    np.frombuffer(k[1], dtype=np.float32),
+                    np.frombuffer(k[2], dtype=np.float32),
+                ])
+                for k in self.key_array
+            ])
+
+            assert(len(self.key_array) > 0), "No trajectories stored in EpisodicMemory."
+
+            search_space = np.concatenate([self._flatten_key(key_temp, from_bytes=True).reshape(1,-1) for key_temp in self.key_array])  # shape: (N, D)
+            # search_space = np.concatenate([key.reshape(1,-1) for key in key_array])  # shape: (N, D)
+
+            # x = key.reshape(1,-1)
+            self.kNN_obj = NearestNeighbors(
+                n_neighbors=self.k_nn,
+                metric="euclidean",   # or cosine, mahalanobis, etc.
+                n_jobs= -1            ## doing multithreading yes yes very very good
+            ).fit(search_space)
 
 
-    def kNN(self, key: tuple, k: int = 1) -> tuple[list[tuple[None, None, None]], list[None, None, None, None]]:
+    def kNN(self, keys: np.array, k: int = 1) -> tuple[list[tuple[np.array, np.array, np.array]], list[None, int, float, int]]:
         """Return the k-NearestNeighbors (keys + trajectories) among stored trajectory keys.
-
+            Args:
+                keys (np.array): [1, 1024, 5126] - no bytes here object (since only called for ACD calc, not on own EM keys).
             Returns:
-                neighbors_keys: np.array[np.array[]] -> actual values, not the bytes anymore
-                neighbors_trajecories: TODO
+                neighbors_keys (list[tuple]): actual values, not the bytes anymore.
+                neighbors_trajecories (list[rajectoryObject, int, float, int]]): corresponding trajectories.
         """
+        print("VORM BUILDKNNN")
+        self.buildKNN()
+        print("NACHM BUILDKNNN")
 
-        from sklearn.neighbors import NearestNeighbors
-        import numpy as np
-        key_array = list(self.trajectories.keys())
-        assert(len(key_array) > 0), "No trajectories stored in EpisodicMemory."
+        # x = self._flatten_key(key).reshape(1,-1)
 
-        search_space = np.concatenate([self._flatten_key(key).reshape(1,-1) for key in key_array])  # shape: (N, D)
+        distances, indices = self.kNN_obj.kneighbors(keys) ## indices: (1024, 5)
 
-        x = self._flatten_key(key).reshape(1,-1)
-        knn = NearestNeighbors(
-            n_neighbors=k,
-            metric="euclidean"  # or cosine, mahalanobis, etc.
-        ).fit(search_space)
+        ## TODO: following part not efficient
+        print(f"indices type", indices.dtype)
+        print(f"indices shape", indices.shape)
 
-        distances, indices = knn.kneighbors(x) # [None]
+        print("key_vectors_shape:", self.key_vectors.shape)
+        neighbors_keys = self.key_vectors[indices]  ## (1024, 5, 5126)
+        print("neighbors_keys_shape:", neighbors_keys.shape)
+        
+        ## for i in tqdm.tqdm(range(neighbors_keys.shape[0] * neighbors_keys.shape[1])):
 
-        # Return the actual trajectory objects
-        keys = list(self.trajectories.keys())
-
-        neighbors_keys = np.array([
-            np.concatenate([
-                np.frombuffer(keys[i][0], dtype=np.float32),
-                np.frombuffer(keys[i][1], dtype=np.float32),
-                np.frombuffer(keys[i][2], dtype=np.float32),
-            ]) for i in indices[0]
-        ])
         # TODO: maybe only return first transition in each trajectory
-        neighbors_trajecories = [self.trajectories[keys[i]] for i in indices[0]]
+        neighbors_trajectories = [
+            [self.trajectories[self.key_array[i]] for i in row]
+            for row in indices
+        ]
+        #neighbors_trajecories = [[self.trajectories[self.key_array[i]] for i in indices[1]] for _ in indices[0]]
 
-        return (neighbors_keys, neighbors_trajecories)
+        return (neighbors_keys, neighbors_trajectories)
 
     def solution(self, file_path="./sheeprl/algos/dem/solution.txt"):
         try:
@@ -509,12 +542,14 @@ class TrajectoryObject:
                 self.traj_num_mapping.delete(traj_nr)
 
                 self.free_space = max(0, self.last_idx() - start_idx)
+            self.kNN_rebuild_needed = True
 
         elif to_delete == 0:
             pass
 
         else:
             self.traj_num_mapping.delete(traj_nr)
+            self.kNN_rebuild_needed = True
             
     def add(self, value: np.array) -> int:
         """ Add a value into the trajectory.
@@ -525,6 +560,7 @@ class TrajectoryObject:
         Returns: 
             free_space (int): The remaining free space.
         """
+        self.kNN_rebuild_needed = True
         self.memory[-self.free_space] = value # TODO: add tuple (z_t', a_t') |IndexError: index -5 is out of bounds for axis 0 with size 1
         self.free_space -= 1
         # print("ADD VALUE:", value)

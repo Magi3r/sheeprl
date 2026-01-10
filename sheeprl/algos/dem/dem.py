@@ -48,7 +48,7 @@ import pkgutil
 # import os
 # os.environ["HYDRA_FULL_ERROR"] = "1"
 
-from sheeprl.algos.dem.utils import additive_correction_delta
+from sheeprl.algos.dem.utils import additive_correction_delta, parallel_additive_correction_delta
 from sheeprl.algos.dem.episodic_memory import EpisodicMemory as EM
 
 # Decomment the following two lines if you cannot start an experiment with DMC environments
@@ -72,6 +72,8 @@ def train(
     actions_dim: Sequence[int],
     moments: Moments,
     episodic_memory: EM,
+    read_dream_mean_std: np.ndarray,
+    read_z: float = 1.0,
 ) -> None:
     """Runs one-step update of the agent.
 
@@ -273,14 +275,22 @@ def train(
         # actions shape: torch.Size([1, 1024, 6])
 
         ### TODO: do stuff with uncertainties, should be (1024), of (1, 1024) but needs testing.
-        # start = time.perf_counter_ns()
-
         return_uncertainty = True
         if return_uncertainty: uncertainties = np.random.rand(1024)
 
+        start = time.perf_counter_ns()
         imagined_prior, recurrent_state, uncertainties = world_model.rssm.imagination(imagined_prior, recurrent_state, actions, return_uncertainty = return_uncertainty)
+        # print(uncertainties.shape)
+        # print(torch.std(uncertainties).cpu().numpy())
+
+        ### update treshold based on rolling mean and std
+        read_dream_mean_std = np.array([torch.mean(uncertainties).cpu().numpy() * cfg.episodic_memory.read_exp_mov_avg_alpha + read_dream_mean_std[0] * (1 - cfg.episodic_memory.read_exp_mov_avg_alpha),
+                                        torch.std(uncertainties).cpu().numpy() * cfg.episodic_memory.read_exp_mov_avg_alpha + read_dream_mean_std[1] * (1 - cfg.episodic_memory.read_exp_mov_avg_alpha)])
+        lookup_treshold = read_dream_mean_std[0] + read_z * read_dream_mean_std[1]
+
+        # print(" updated read_dream_mean_std:", read_dream_mean_std, " lookup_treshold:", lookup_treshold)
         # imagined_prior, recurrent_state = world_model.rssm.imagination(imagined_prior, recurrent_state, actions, return_uncertainty = return_uncertainty)
-        # print(f"imag duration: {time.perf_counter_ns()- start}ns")
+        print(f"imag duration: {(time.perf_counter_ns()- start)/1000_000}ms")
 
         imagined_prior = imagined_prior.view(1, -1, stoch_state_size)   ## should be sahep of: (1, :) , 32)
         imagined_latent_state = torch.cat((imagined_prior, recurrent_state), -1)
@@ -313,13 +323,32 @@ def train(
             #     acd: float = additive_correction_delta(key, episodic_memory, world_model, k)
             #     return acd
 
-            #########################
-            print("\n before ACD check")
-            for i in range(recurrent_state.shape[1]): # loop over all 1024
-                if uncertainties[i] > cfg.episodic_memory.read_threshold_last_N: ##  TODO: hier kommen wa nie rein :)
-                    print("\nCALCULATE ACD SOOONNNNN")
-                    key: tuple = (recurrent_state[i], imagined_prior[i], actions[i])
-                    acd: float = additive_correction_delta(key, episodic_memory, world_model, k)
+            ## TODO: multithread this!!! e.g. query kNN multithread & throw this as batch into models (so we need 2 functions, see ~additive_correction_delta())
+
+            print(f"calc ACD: {recurrent_state.shape[1]} times")
+
+            ## making this for loop parallel:
+            start = time.perf_counter_ns()
+            ACDs: np.array = parallel_additive_correction_delta(recurrent_state, 
+                                                                imagined_prior, 
+                                                                actions, 
+                                                                episodic_memory, 
+                                                                world_model, 
+                                                                k, 
+                                                                device=device)
+            print(f"parallel additive_correction_delta duration: {(time.perf_counter_ns()- start)/1000_000}ms for EM of size: {len(episodic_memory)}")
+            start = time.perf_counter_ns()
+            # for j in range(recurrent_state.shape[1]): # loop over all 1024
+            #     # if uncertainties[i] > cfg.episodic_memory.read_threshold_last_N: ##  TODO: richtige logic machen
+
+            #     key: tuple = (recurrent_state[:, j].cpu().detach().numpy(), imagined_prior[:, j].cpu().detach().numpy(), actions[:, j].cpu().detach().numpy())   ## (1, 4096) (1, 1024) (1, 6)
+            #     acd: np.array = additive_correction_delta(key, episodic_memory, world_model, k, device=device)
+            #     if j == 0:
+            #         print("0th ACD mean:", np.mean(acd))
+            
+
+            print(f"additive_correction_delta duration: {(time.perf_counter_ns()- start)/1000_000}ms for EM of size: {len(episodic_memory)}")
+        print(f"dream lookup threshold is: {lookup_treshold}")
 
     # Predict values, rewards and continues
     predicted_values = TwoHotEncodingDistribution(critic(imagined_trajectories), dims=1).mean
@@ -550,9 +579,12 @@ def main(fabric: Fabric, cfg: Dict[str, Any]):
     rank = fabric.global_rank
     world_size = fabric.world_size  ## number of processes (GPUs)?
 
-    ### stores last uncertainty values to calculate avg. and adapt treshold
-    last_N_env_uncertainties = np.zeros((cfg.episodic_memory.write_threshold_last_N), dtype = np.float32)
-    last_N_dream_uncertainties = np.zeros((cfg.episodic_memory.read_threshold_last_N), dtype = np.float32)
+    ### stores most recent env uncertainty values to calculate avg. and adapt treshold for inserting into EM
+    write_z = cfg.episodic_memory.write_std_multiplier_start
+    last_N_env_uncertainties = np.zeros((cfg.episodic_memory.write_window_size_N), dtype = np.float32)
+    ## rolling mean and std for batched reading while dreaming (Knn lookup)
+    read_z = cfg.episodic_memory.read_std_multiplier_start
+    read_dream_mean_std = np.zeros((2), dtype = np.float32) ### mean and std for reading from the em (kNN lookup)
 
     if cfg.checkpoint.resume_from:
         state = fabric.load(cfg.checkpoint.resume_from)
@@ -769,8 +801,19 @@ def main(fabric: Fabric, cfg: Dict[str, Any]):
     ### policy_steps_per_iter = int(cfg.env.num_envs * fabric.world_size)
     ### so policy_steps_per_iter = total number of parallel env calls, because fabric.world_size = number of gpus??
 
+    last_n_uncertainty_mean = 0.0
+    last_n_uncertainty_std  = 0.0
+
     for iter_num in range(start_iter, total_iters + 1):
         policy_step += policy_steps_per_iter
+
+        ### adjust EM read and write std mulittipliers
+        if write_z < cfg.episodic_memory.write_std_multiplier_max and \
+          policy_step >= cfg.episodic_memory.write_std_inc_start_at_ep:
+            write_z = min(cfg.episodic_memory.write_std_multiplier_max, write_z * cfg.episodic_memory.write_std_inc_factor)
+        if read_z < cfg.episodic_memory.read_std_multiplier_max and \
+          policy_step >= cfg.episodic_memory.read_std_inc_start_at_ep:
+            read_z = min(cfg.episodic_memory.read_std_multiplier_max, read_z * cfg.episodic_memory.read_std_inc_factor)
 
     ### handle environment interaction and replay_buffer filling
     ###-----------------------------------
@@ -817,9 +860,18 @@ def main(fabric: Fabric, cfg: Dict[str, Any]):
                     ## TODO: additive correction term
                     ## additive_correction_delta()
                 ### update ems uncertainty treshold
-                last_N_env_uncertainties[iter_num % last_N_env_uncertainties.shape[0]] = uncertainty
-                em_insert_threshold = np.percentile(last_N_env_uncertainties, cfg.episodic_memory.percentile_treshold)
-                episodic_memory.set_threshold(em_insert_threshold)
+                if z_logits is not None:
+                    last_N_env_uncertainties[iter_num % last_N_env_uncertainties.shape[0]] = uncertainty    ## here add single value
+                    last_n_uncertainty_mean = np.mean(last_N_env_uncertainties)
+                    last_n_uncertainty_std = np.std(last_N_env_uncertainties)
+                    # print(f"uncertainty mean: {last_n_uncertainty_mean} std: {last_n_uncertainty_std}")
+                    em_read_threshold = last_n_uncertainty_mean + write_z * last_n_uncertainty_std
+                    episodic_memory.set_threshold(em_read_threshold)
+                    print(f"EM read threshold set to: {em_read_threshold}")
+
+                
+                # em_insert_threshold = np.percentile(last_N_env_uncertainties, cfg.episodic_memory.percentile_treshold)
+                # episodic_memory.set_threshold(em_insert_threshold)
 
                 step_data["actions"] = actions.reshape((1, cfg.env.num_envs, -1))
                 rb.add(step_data, validate_args=cfg.buffer.validate_args)
@@ -853,7 +905,7 @@ def main(fabric: Fabric, cfg: Dict[str, Any]):
 
                 ## Update Episodic Memory
                 # uncertainty = np.array([0.8])
-                if cfg.enable_rehersal_training:
+                if cfg.episodic_memory.enable_rehersal_training:
                     episodic_memory.step(
                         state={"deter": h, "stoch": z_logits},
                         action=actions,
@@ -971,13 +1023,15 @@ def main(fabric: Fabric, cfg: Dict[str, Any]):
                             is_continuous,
                             actions_dim,
                             moments,
-                            episodic_memory
+                            episodic_memory, 
+                            read_dream_mean_std, 
+                            read_z
                         )
                         cumulative_per_rank_gradient_steps += 1
                     train_step += world_size
             # end_time = time.time()
             # print(f"training per_rank_gradient_steps:{per_rank_gradient_steps}, seq_len: {cfg.algo.per_rank_sequence_length} times took {(end_time - start_time)/1000} seconds ")
-            if cfg.enable_rehersal_training and iter_num % cfg.episodic_memory.rehersal_train_every == 0:
+            if cfg.episodic_memory.enable_rehersal_training and iter_num % cfg.episodic_memory.rehersal_train_every == 0:
                 rehearsal_train(
                     fabric          = fabric,
                     world_model     = world_model,
@@ -1003,8 +1057,14 @@ def main(fabric: Fabric, cfg: Dict[str, Any]):
                 "Params/replay_ratio", cumulative_per_rank_gradient_steps * world_size / policy_step, policy_step
             )
 
-            fabric.log("Uncertanty", uncertainty, policy_step)
-            fabric.log("EM_Insert_Treshold", em_insert_threshold, policy_step)
+            # Log EM info
+            fabric.log("EM/size", len(episodic_memory), policy_step)
+            fabric.log("EM/write_z", write_z, policy_step)
+            fabric.log("EM/read_z", read_z, policy_step)
+            fabric.log("EM/Env_Uncertainty", last_n_uncertainty_mean, policy_step)
+            fabric.log("EM/Dream_Uncertainty", read_dream_mean_std[0], policy_step)
+            fabric.log("EM/Write_Treshold", (last_n_uncertainty_mean + write_z * last_n_uncertainty_std), policy_step)
+            fabric.log("EM/Read_Treshold", (read_dream_mean_std[0] + read_z * read_dream_mean_std[1]), policy_step)
 
             # Sync distributed timers
             if not timer.disabled:
