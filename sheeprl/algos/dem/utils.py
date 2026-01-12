@@ -7,6 +7,7 @@ import numpy as np
 import torch
 from lightning import Fabric
 from torch import Tensor, nn
+import time
 
 from sheeprl.utils.env import make_env
 from sheeprl.utils.imports import _IS_MLFLOW_AVAILABLE
@@ -278,64 +279,70 @@ def additive_correction_delta(key: tuple[np.array, np.array, np.array], episodic
 
     return acd
 
-def parallel_additive_correction_delta(recurrent_states: torch.tensor, prior_logits: torch.tensor, actions: torch.tensor, episodic_memory: EM, world_model: WorldModel, k: int, device: torch.device) -> np.array:
+def parallel_additive_correction_delta(recurrent_states: torch.tensor, prior_logits: torch.tensor, actions: torch.tensor, episodic_memory: EM, world_model: WorldModel, k: int, device: torch.device) -> torch.tensor:
     """Calculating Additive Correction Delta (ACD)
     
     Args:
         recurrent_states (torch.tensor): of shape [1, 1024, 4096]
         prior_logits (torch.tensor): of shape [1, 1024, 1024]
         actions (torch.tensor): of shape [1, 1024, 6]
+    Returns:
+        ACDs (torch.tensor): calculated acd
     """
     h_size = recurrent_states.shape[2]   # 4096
     z_size = prior_logits.shape[2]       # 1024
     a_size = actions.shape[2]            # 6
+    their_seq = recurrent_states.shape[1]
 
     if len(episodic_memory) < k:
         # print("warning: EM is empty")
-        return np.zeros((k, z_size))
-    
+        return torch.zeros((k, z_size)).to(device=device)
+
+    ## moving to CPU and after kNN back to GPU: duration ~14ms
+    # start2 = time.perf_counter_ns()    
     keys = torch.cat([recurrent_states, prior_logits, actions], dim=-1)[0].cpu().detach().numpy()   ### shape: [1, 1024, 5126]
-    print("keys_tensor shape: ", keys.shape) ## [1024, 1024+4096+a_size]
-    print(type(episodic_memory))
-    nn_keys, nn_trajectories = episodic_memory.kNN(keys, k) ## nn_keys: (1024, 5, 5126)
-    # final_batch = np.zeros((k, *(recurrent_states[1].shape[1:])))
+    # start = time.perf_counter_ns()    
+    nn_keys, nn_trajectories = episodic_memory.kNN(keys, k) ## nn_keys: (1024, 5, 5126); nn_trajectories: (1024, 5, 1030)
+    # print(f"OUR kNN call duration: {(time.perf_counter_ns()- start)/1000_000}ms")    
+    nn_keys = torch.from_numpy(nn_keys).to(device=device)
+    nn_trajectories = torch.from_numpy(nn_trajectories).to(device=device)
+    # print(f"OUR kNN + SCHIEBI SCHIEBI duration: {(time.perf_counter_ns()- start2)/1000_000}ms")    
 
-    # ## TODO: tqdm this
-    # episodic_memory.buildKNN()
-    # for i in tqdm.tqdm(range(key[0].shape[1])):
-    #     single_key = (key[0][0, i], key[1][0, i], key[2][0, i])
+    # print("prior_logits shape", prior_logits.shape)                 ## [1, 1024, 1024]
+    # priors = compute_stochastic_state(prior_logits.unsqueeze(0))    ## [1, 1, 1024, 32, 32]
+    # print("priors shape", priors.shape)
+    # priors = priors.view(*priors.shape[:-2], -1)                    ## [1, 1, 1024, 1024]
+    # print("priors view shape", priors.shape)
+    # print("recurrent_states shape", recurrent_states.shape)         ## [1, 1024, 4096]
+    # print("actions shape", actions.shape)                           ## [1, 1024, 6]
 
-    #     nn_keys, nn_trajectories = episodic_memory.kNN(single_key, k)
+    start = time.perf_counter_ns()
+    next_prior_logits = nn_trajectories[:, :, :z_size]
 
-    #     ## from key:        recurrent_states, prior_logits, actions; shape: (k, 5128)
-    #     recurrent_states = torch.from_numpy(nn_keys[:, :h_size]).to(device=0).unsqueeze(0)  ## (1, k, 4096)
-    #     prior_logits = torch.from_numpy(nn_keys[:, h_size:h_size+z_size]).to(device=device) ## (1, k, 1024)
-    #     actions = torch.from_numpy(nn_keys[:, h_size+z_size:]).to(device=0).unsqueeze(0)    ## (1, k, 6)
+    knn_prior_logits = nn_keys[:, :, h_size:h_size+z_size]   ## [1024, 5, 1024]
+    knn_recurrent_states = nn_keys[:, :, :h_size]            ## [1024, 5, 4096]
+    knn_actions = nn_keys[:, :, h_size+z_size:]              ## [1024, 5, 6]
 
-    #     trajectory_starts = np.array([traj_obj.get_trajectory(idx)[0] for traj_obj, idx, _, _ in nn_trajectories])##.reshape(n, z_size + a_size)
-    #     next_prior_logits = trajectory_starts[:, :z_size]                             ## from trajectory
+    knn_priors = compute_stochastic_state(knn_prior_logits)    
+    knn_priors = knn_priors.view(*(knn_priors.shape[:-2]), -1)                                ## [1024, 5, 1024]
 
-    ## TODO: not working in this state
-    print("prior_logits shape", prior_logits.shape)
-    priors = compute_stochastic_state(prior_logits.unsqueeze(0))    ## unsqueeze here still needed? torch.Size([1, k, 32, 32]); 1 = only single sample, not a entire trajectory
-    print("priors shape", priors.shape)
-    priors = priors.view(*priors.shape[:-2], -1)
-    print("priors view shape", priors.shape)
-
-    next_prior_logits = None    ## TODO: do some efficient logic with nn_trajectories
-
-    # ## TODO: batching 
-    #     ## [k, 1024, 4096]
-    # ##  apply world_model (Sequence + Dynamics model) on keys
+    ## without this view we get: AssertionError: LayerNormGRUCell: Expected input to be 3-D with sequence length equal to 1 but received a sequence of length 1024
+    ## if insteat of view we do .unqueeze(0): AssertionError: LayerNormGRUCell: Expected input to be 1-D or 2-D but received 4-D tensor
+    knn_priors = knn_priors.view(1, -1, z_size) 
+    knn_recurrent_states = knn_recurrent_states.view(1, -1, h_size)                         ## [1, 1024 * 5, 4096] = [1, 5120, 4096]
+    knn_actions = knn_actions.view(1, -1, a_size) 
 
     ## what works with imagination:
     ## priors           torch.Size([1, 1024, 1024])
     ## recurrent_states torch.Size([1, 1024, 4096])
     ## actions          torch.Size([1, 1024, 6])
+    next_imagined_prior_logits, _ = world_model.rssm.imagination(knn_priors, knn_recurrent_states, knn_actions, return_logits=True) 
 
-    next_imagined_prior_logits, _ = world_model.rssm.imagination(priors, recurrent_states, actions, return_logits=True)
+    next_imagined_prior_logits = next_imagined_prior_logits.view(their_seq, k, z_size)   ## [1024, 5, 1024]
 
     ## calculate additive correction delta
-    acd = next_prior_logits - next_imagined_prior_logits.cpu().detach().numpy()
+    acd = next_prior_logits - next_imagined_prior_logits
 
-    return# acd
+    # print(f"MODEL INFERENCE + LAST ACD part duration: {(time.perf_counter_ns()- start)/1000_000}ms")
+
+    return acd

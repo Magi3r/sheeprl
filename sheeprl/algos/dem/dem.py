@@ -337,7 +337,7 @@ def train(
                                                                 k, 
                                                                 device=device)
             print(f"parallel additive_correction_delta duration: {(time.perf_counter_ns()- start)/1000_000}ms for EM of size: {len(episodic_memory)}")
-            start = time.perf_counter_ns()
+            print("calculated ACDs shape:", ACDs.shape)
             # for j in range(recurrent_state.shape[1]): # loop over all 1024
             #     # if uncertainties[i] > cfg.episodic_memory.read_threshold_last_N: ##  TODO: richtige logic machen
 
@@ -345,9 +345,7 @@ def train(
             #     acd: np.array = additive_correction_delta(key, episodic_memory, world_model, k, device=device)
             #     if j == 0:
             #         print("0th ACD mean:", np.mean(acd))
-            
 
-            print(f"additive_correction_delta duration: {(time.perf_counter_ns()- start)/1000_000}ms for EM of size: {len(episodic_memory)}")
         print(f"dream lookup threshold is: {lookup_treshold}")
 
     # Predict values, rewards and continues
@@ -867,8 +865,8 @@ def main(fabric: Fabric, cfg: Dict[str, Any]):
                     # print(f"uncertainty mean: {last_n_uncertainty_mean} std: {last_n_uncertainty_std}")
                     em_read_threshold = last_n_uncertainty_mean + write_z * last_n_uncertainty_std
                     episodic_memory.set_threshold(em_read_threshold)
+                    print(f"Env Uncertaitny: {uncertainty}")
                     print(f"EM read threshold set to: {em_read_threshold}")
-
                 
                 # em_insert_threshold = np.percentile(last_N_env_uncertainties, cfg.episodic_memory.percentile_treshold)
                 # episodic_memory.set_threshold(em_insert_threshold)

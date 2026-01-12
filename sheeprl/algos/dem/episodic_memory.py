@@ -134,7 +134,7 @@ class EpisodicMemory():
             return
         action = action.astype(np.float32)
         # add new trajecory
-        if uncertainty > self.uncertainty_threshold:
+        if uncertainty >= self.uncertainty_threshold:
             assert(self.prev_state is not None)
             # value = (z, h)          # (z_t, h_t)
             # print("asdfjklössssss ", action, action.tobytes()) # asdfjklössssss  [[[5]]] b'\x05\x00\x00\x00\x00\x00\x00\x00'
@@ -375,35 +375,37 @@ class EpisodicMemory():
             Args:
                 keys (np.array): [1, 1024, 5126] - no bytes here object (since only called for ACD calc, not on own EM keys).
             Returns:
-                neighbors_keys (list[tuple]): actual values, not the bytes anymore.
-                neighbors_trajecories (list[rajectoryObject, int, float, int]]): corresponding trajectories.
+                neighbors_keys (np.array[tuple]): actual values, not the bytes anymore.
+                trajectory_first_elems (np.array): corresponding trajectories first elems - shape: (1024, k, z_size + a_size)
         """
-        print("VORM BUILDKNNN")
+        import time
+
+        # start = time.perf_counter_ns()
         self.buildKNN()
-        print("NACHM BUILDKNNN")
+        # print(f"BUILD KNN duration: {(time.perf_counter_ns()- start)/1000_000}ms")
 
-        # x = self._flatten_key(key).reshape(1,-1)
+        # start = time.perf_counter_ns()
+        distances, indices = self.kNN_obj.kneighbors(keys) ## indices: (1024, 5)    DURATION: ~37.432707ms for 5 trajectories
+        # print(f"PARALLEL KNN QUERYING duration: {(time.perf_counter_ns()- start)/1000_000}ms")
 
-        distances, indices = self.kNN_obj.kneighbors(keys) ## indices: (1024, 5)
-
-        ## TODO: following part not efficient
-        print(f"indices type", indices.dtype)
-        print(f"indices shape", indices.shape)
-
-        print("key_vectors_shape:", self.key_vectors.shape)
         neighbors_keys = self.key_vectors[indices]  ## (1024, 5, 5126)
-        print("neighbors_keys_shape:", neighbors_keys.shape)
         
         ## for i in tqdm.tqdm(range(neighbors_keys.shape[0] * neighbors_keys.shape[1])):
 
-        # TODO: maybe only return first transition in each trajectory
-        neighbors_trajectories = [
-            [self.trajectories[self.key_array[i]] for i in row]
-            for row in indices
-        ]
-        #neighbors_trajecories = [[self.trajectories[self.key_array[i]] for i in indices[1]] for _ in indices[0]]
+        trajectory_first_elems = np.empty((1024, 5, 1024+6))    ## (1024, 5, 1030) TODO: sizes hardcoded
 
-        return (neighbors_keys, neighbors_trajectories)
+        # start = time.perf_counter_ns()
+        # Iterate over the indices and keys
+        for i in range(indices.shape[0]):
+            for j in range(indices.shape[1]):
+                key_index = int(indices[i, j])
+                key = self.key_array[key_index]
+                traj_obj, idx, _, _ = self.trajectories[key]
+                value = traj_obj.get_trajectory(idx)
+                trajectory_first_elems[i, j, :] = value[0]  # only take first (z, a) of shape (1030)
+        # print(f"FOR FOR LOOPI IN KNN duration: {(time.perf_counter_ns()- start)/1000_000}ms")
+
+        return (neighbors_keys, trajectory_first_elems)
 
     def solution(self, file_path="./sheeprl/algos/dem/solution.txt"):
         try:
