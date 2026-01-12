@@ -1,15 +1,17 @@
 import numpy as np
-import hnswlib
 from torch.utils.data import Dataset, DataLoader
 import torch
 from sklearn.neighbors import NearestNeighbors
 import warnings
 from lightning.fabric import Fabric
 from sortedcontainers import SortedSet
+import time
 
-class EpisodicMemory():
+from sheeprl.algos.dem.knn import exact_search
+
+class GPUEpisodicMemory():
     """
-    Episodic Memory object for trajectory management.
+    Episodic Memory object for trajectory management running mostly on GPU.
 
     The EpisodicMemory class is designed to store and manage trajectories in a RL environment.
     It uses a dict to store trajectories, where each key is a tuple of (h, z, a) and the value is a tuple of (TrajectoryObject, idx, uncertainty, time of birth).
@@ -41,29 +43,39 @@ class EpisodicMemory():
         :param time_to_live: Time to life of trajectories (not always define the maximum, used for weighted relevancy).
         :type time_to_live: int
         """
+        self.device: torch.device = fabric.device if fabric is not None else torch.device("cpu")
+
         # self.solution()
         self.trajectory_length: int = trajectory_length
         self.uncertainty_threshold: float = uncertainty_threshold
-        self.key_size = h_shape # + z_shape + a_shape # TODO: will probably need to change if shapes are not 1D
-        """Size of the key vector (h, z, a)"""
-        self.a_shape = a_shape[0]   # a_shape: (6,)
         self.h_shape = h_shape      # h_shape: 4096
         self.z_shape = z_shape      # z_shape: 1024
+        self.a_shape = a_shape[0]   # a_shape: (6,)
+        self.key_size = self.h_shape + self.z_shape + self.a_shape
+        """Size of the key vector (h, z, a)"""
 
         self.k_nn: int = k_nn
-
-        self.trajectories: dict = {} # key: (h_t, z_t, a_t), value: (TrajectoryObject, idx, uncertainty, time of birth)
-
-        self.current_trajectory: TrajectoryObject | None = None
-
-        self.prev_state = None
-
-        self.hnsw_storage: hnswlib.Index = None
-        self._init_hnsw(max_elements=max_elements*2, dim = 32*32+512+6) # TODO: insert shapes properly hier error?
-        self.step_counter: int = 0
         self.max_elements: int = max_elements
+
+        # self.trajectories: dict = {} # key: (h_t, z_t, a_t), value: (TrajectoryObject, idx, uncertainty, time of birth)
+
+        ## CURRENTLY: if deleting 
+        ## indirect connection between key & TrajObs (e.g. 3rd key = 3rd TrajObj = 3rd)
+        self.trajectories_tensor: torch.Tensor = torch.empty((self.max_elements, self.key_size), device = self.device)
+        ### on CPU an np because only references to Objects in RAM  (but traj data inside TrajObj on GPU)
+        self.traj_obj: np.array        = np.empty(self.max_elements, dtype=object)            ## object refferences
+        self.idx: torch.Tensor         = torch.empty(self.max_elements, dtype=torch.int64, device = self.device)
+        self.uncertainty: torch.Tensor = torch.empty(self.max_elements, dtype=torch.float32, device = self.device)
+        self.birth_time: torch.Tensor  = torch.empty(self.max_elements, dtype=torch.int64, device = self.device)
+        
+        self.current_trajectory: TrajectoryObject | None = None
+        self.num_trajectories: int = 0  ## number of trajectories currently stored (and so also idx of last empty elem)
+
+        self.prev_state: torch.Tensor = torch.empty(self.key_size, device = self.device)
+
+        self.step_counter: int = 0
         # pruning stuff
-        self.prune_fraction: int = prune_fraction
+        self.prune_fraction: float = prune_fraction
         self.time_to_live = time_to_live
 
         self.kNN_rebuild_needed: bool = True            ## if NearestNeighbors object needs to be rebuild (due to change in keys)
@@ -71,45 +83,63 @@ class EpisodicMemory():
         self.key_vectors: np.array = np.empty([1])      ## array containing all keys as flatted
         self.key_array: list = []                       ## list containing all keys (this bytes shit)
 
-        self.device: torch.device = fabric.device if fabric is not None else torch.device("cpu")
+        self.is_prev_stoch_state_none = True    ## used in step function to keep track of newly started episode
 
-        # print(f"init EM with following shapes: z:{z_shape}, h:{h_shape}, a:{a_shape}, key_size: {self.key_size}")
         warnings.warn("EpisodicMemory currently only works with a single environment instance!")
 
     def set_threshold(self, uncertainty_threshold: float =  0.9):
         self.uncertainty_threshold = uncertainty_threshold
 
     def __len__(self):
-        return len(self.trajectories)
+        return self.num_trajectories
 
-    def __create_traj(self, key: tuple, uncertainty: float):
+    def __create_traj(self, h: torch.Tensor, z: torch.Tensor, a: torch.Tensor, uncertainty: float):
         """ Create new empty trajectory, that is accessible by a key.
         """
         # key: (h_t, z_t, a_t)
-        # uncertainty: float
         trajectory = self.current_trajectory if self.current_trajectory else TrajectoryObject(self.trajectory_length, a_shape=self.a_shape, z_shape=self.z_shape, device=self.device) # z_shape, action_shape
         self.current_trajectory = trajectory
 
         # self.trajectories[key] = (trajectory, trajectory.last_idx(), uncertainty)
-        self.trajectories[key] = [trajectory, trajectory.new_traj(), uncertainty, self.step_counter]
+        # self.trajectories[key] = [trajectory, trajectory.new_traj(), uncertainty, self.step_counter]
+
+        self.trajectories_tensor[self.num_trajectories][:self.h_shape] = h
+        self.trajectories_tensor[self.num_trajectories][self.h_shape:self.h_shape+self.z_shape] = z
+        self.trajectories_tensor[self.num_trajectories][-self.a_shape:] = a
+
+        self.traj_obj[self.num_trajectories] = trajectory
+        self.idx[self.num_trajectories] = trajectory.new_traj()
+        self.uncertainty[self.num_trajectories] = uncertainty
+        self.birth_time[self.num_trajectories] = self.step_counter
+
+        self.num_trajectories += 1
         
-    def __fill_traj(self, value: tuple):
+    def __fill_traj(self, z: torch.Tensor, a: torch.Tensor) -> None:
         """ Adds a new transition (z, a) to the current trajectory. If the trajectory becomes full, it clears current_trajectory."""
         # value: (z_{t'}, a_{t'}) -> torch.Size([1, 1, 1024]), float (?)
         assert(self.current_trajectory is not None)
-        z_a = np.concatenate([value[0].ravel(), value[1].ravel()]) # before: z -> torch.Size([1, 1, 1024])
-        if self.current_trajectory.add(z_a) == 0:
+        # z_a = np.concatenate([value[0].ravel(), value[1].ravel()]) # before: z -> torch.Size([1, 1, 1024])
+        if self.current_trajectory.add(z, a) == 0:
             self.current_trajectory = None
 
-    # !! use .tobytes() for key elements
-    def remove_traj(self, key: tuple):
-        """ Remove trajectory by its key """
-        assert(key in self.trajectories)
-        traj_obj, idx, _, _ = self.trajectories[key]
-        traj_obj.del_traj(idx)
-        del self.trajectories[key]
 
-    def step(self, state: dict, action: np.ndarray, uncertainty: float, done:bool=False):
+    def remove_traj(self, index: int) -> None:
+        assert(index < self.num_trajectories)
+
+        traj_obj: TrajectoryObject = self.traj_obj[index]
+        traj_index = self.idx[index]
+        traj_obj.del_traj(traj_index)
+        
+        self.trajectories_tensor[index:-1] = self.trajectories_tensor[index+1:]
+
+        self.traj_obj[index:-1] = self.traj_obj[index+1:] 
+        self.idx[index:-1] = self.idx[index+1:] 
+        self.uncertainty[index:-1] = self.uncertainty[index+1:] 
+        self.birth_time[index:-1] = self.birth_time[index+1:] 
+
+        self.num_trajectories -= 1
+    
+    def step(self, h: torch.Tensor, z: torch.Tensor, a: torch.Tensor, uncertainty: float, done:bool=False) -> None:
         """ 
         Step through the memory with new transition.
 
@@ -122,48 +152,37 @@ class EpisodicMemory():
         Ends the trajectory and clears bookkeeping if done=True.
 
         Args:
-            state (dict): The current state, containing 'deter' and 'stoch' keys.
-            action (np.ndarray): The action taken in the current state.
+            h (torch.Tensor): The recurrent state.
+            z (torch.Tensor): The stochastic state.
+            a (torch.Tensor): The action taken.
             uncertainty (float): The uncertainty of the current state.
             done (bool, optional): Whether the episode is done. Defaults to False.
         """
         # initial step, just store. Even if uncertain dont have a key for it 
         # or if deter is None while filling replay_buffer
-        if self.prev_state == None or self.prev_state["deter"] is None:
-            self.prev_state = state
+        if self.is_prev_stoch_state_none:
+            if (z is None):
+                self.is_prev_stoch_state_non = True
+                return
+            self.prev_state[:self.h_shape] = h
+            self.prev_state[self.h_shape:self.h_shape+self.z_shape] = z
+            self.is_prev_stoch_state_none = False
             return
-        action = action.astype(np.float32)
         # add new trajecory
         if uncertainty >= self.uncertainty_threshold:
             assert(self.prev_state is not None)
             # value = (z, h)          # (z_t, h_t)
-            # print("asdfjklössssss ", action, action.tobytes()) # asdfjklössssss  [[[5]]] b'\x05\x00\x00\x00\x00\x00\x00\x00'
-            key = (self.prev_state["deter"].tobytes(), self.prev_state["stoch"].tobytes(), action.tobytes())    # (h_t, z_t, a_t) # for now fatten so dict can hash it
-
-            # print("self.prev_state['stoch'].tobytes() len:", len(self.prev_state["stoch"].tobytes()))
-            # print("self.prev_state['deter'].tobytes() len:", len(self.prev_state["deter"].tobytes()))
-            
-            # SHAPES:
-            #   h: (1, 1, 4096)
-            #   z_logits: (1, 1024)
-            #   real_actions: (1, 1, 1)
-            #   rewards:      (1,)
-            #   dones:        (1,)
-            # EM| Num trajectories: 0| Trajectory length: 20| Uncertainty thr.: 0.9| Current trajectory: None
-            # self.prev_state['stoch'].tobytes() len: 4096
-            # self.prev_state['deter'].tobytes() len: 16384 = 4bytes * 4096
+            # SHAPES: h: (1, 1, 4096); z_logits: (1, 1024); real_actions: (1, 1, 1); rewards: (1,); dones: (1,)
 
             if self.current_trajectory is not None and self.current_trajectory.free_space != 0:
-                self.__fill_traj((self.prev_state["stoch"], action))
+                self.__fill_traj(self.prev_state[-self.z_shape:], a)
             if len(self) >= self.max_elements:
-                # print("~~prune due to full EM!~~")
                 self._prune_memory(prune_fraction=self.prune_fraction)
-            self.__create_traj(key, uncertainty)
+            self.__create_traj(h, z, a, uncertainty)
         # just fill trajectory space
         elif self.current_trajectory is not None and self.current_trajectory.free_space != 0:
-            assert(self.prev_state is not None)
-            
-            self.__fill_traj((self.prev_state["stoch"], action))
+            assert(not self.is_prev_stoch_state_non)
+            self.__fill_traj(self.prev_state[-self.z_shape:], a)
         # no space: no trajectory
         else:
             self.current_trajectory = None
@@ -172,25 +191,19 @@ class EpisodicMemory():
         # clear state and current trajectory as next step will be totally independend from this
         if done:
             if self.current_trajectory is not None:
-                self.__fill_traj((state["stoch"], np.zeros_like(action).astype(np.float32)))
+                self.__fill_traj(torch.cat((z, torch.zeros((1, self.a_shape), device=self.device)), dim=1))
             self.current_trajectory = None
-            self.prev_state = None
+            self.is_prev_stoch_state_non = True
         else:
-            self.prev_state = state #.copy()?
+            self.prev_state[:self.h_shape] = h
+            self.prev_state[self.h_shape:self.h_shape+self.z_shape] = z
+            self.prev_state[-self.a_shape:] = a
+            self.is_prev_stoch_state_non = False
 
         self.step_counter += 1
 
-    # def _flatten_key(self, key):
-    #     """Convert (z, h, a) tensors into one numpy vector."""
-    #     z, h, a = key  # each is a torch tensor
-    #     z = z.flatten().cpu().numpy()
-    #     h = h.flatten().cpu().numpy()
-    #     a = a.flatten().cpu().numpy()
-    #     return np.concatenate([z, h, a], axis=0)
-    
     def __str__(self):
-        return f"EM| Num trajectories: {len(self.trajectories)}| Trajectory length: {self.trajectory_length}| Uncertainty thr.: {self.uncertainty_threshold}| Current trajectory: {self.current_trajectory}"
-
+        return f"EM| Num trajectories: {self.num_trajectories}| Trajectory length: {self.trajectory_length}| Uncertainty thr.: {self.uncertainty_threshold}| Current trajectory: {self.current_trajectory}"
 
     def __getitem__(self, idx):
         Exception("Not implemented yet.")
@@ -198,7 +211,7 @@ class EpisodicMemory():
         # sample = mem.get_trajectory(offset)
         # return sample
 
-    def get_samples(self, skip_non_full_traj: bool = True) -> tuple[np.array, np.array, np.array]:
+    def get_samples(self, skip_non_full_traj: bool = True) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """
         Return all stored trajectories in batched form for training.
 
@@ -216,39 +229,34 @@ class EpisodicMemory():
         if len(self) == 0: return (None, None, None)
 
         ## Ones for non-invalid probability tensors
-        initial_h = np.ones((1, len(self.trajectories), self.h_shape), dtype=np.float32)
-        z_all = np.ones((self.trajectory_length + 1, len(self.trajectories), self.z_shape), dtype=np.float32)
-        a_all = np.ones((self.trajectory_length + 1, len(self.trajectories), self.a_shape), dtype=np.float32)
+        initial_h = torch.ones((1, self.num_trajectories, self.h_shape), dtype=np.float32, device=self.device)
+        z_all = torch.ones((self.trajectory_length + 1, self.num_trajectories, self.z_shape), dtype=np.float32, device=self.device)
+        a_all = torch.ones((self.trajectory_length + 1, self.num_trajectories, self.a_shape), dtype=np.float32, device=self.device)
         
         full_trajes = 0
-        for i, (key, val) in enumerate(self.trajectories.items()):  # val: (TrajectoryMemory, idx, uncertainty, time of birth)
+        for i in range(self.num_trajectories):
+        # for i, (key, val) in enumerate(self.trajectories.items()):  # val: (TrajectoryMemory, idx, uncertainty, time of birth)
             # value
-            traj_obj: TrajectoryObject = val[0]
-            traj_nr: int = val[1]
-            trajectory: np.array = traj_obj.get_trajectory(traj_nr)
-
-            # single rehearsal train took: 1.9778013229370117e-05 seconds ~EM length: 5
-            # training per_rank_gradient_steps:1, seq_len: 64 times took 0.0007024538516998291 seconds 
-            # trajectory.shape[0]::5
-            # trajectory.shape[0]::1
-            # trajectory.shape[0]::0
-            # trajectory.shape[0]::0
-            # trajectory.shape[0]::0
-            # trajectory.shape[0]::0
-            # batch_size: 1; i:0; j:1
+            traj_obj: TrajectoryObject = self.traj_obj[i]
+            traj_nr: int = self.idx[i]
+            trajectory: torch.Tensor = traj_obj.get_trajectory(traj_nr)
 
             # print(f"trajectory.shape[0]::{trajectory.shape[0]}      - traj_nr: {traj_nr}")
             if skip_non_full_traj and (trajectory.shape[0] != self.trajectory_length): continue
             full_trajes +=1
 
-            z_s = np.array(trajectory[:,:-self.a_shape])   # ! are logits # shape (length, 1024)
-            a_s = np.array(trajectory[:,-self.a_shape:])    # shape(length, 
+            z_s = torch.Tensor(trajectory[:,:-self.a_shape], device=self.device)   # ! are logits # shape (length, 1024)
+            a_s = torch.Tensor(trajectory[:,-self.a_shape:], device=self.device)    # shape(length, 
 
-            z_all[0, i] = np.frombuffer(key[1], dtype=np.float32)  # from shape (512,) into shape (1024,)
-            a_all[0, i] = np.frombuffer(key[2], dtype=np.float32) 
+            #  (h, z, a)
+            z_all[0, i] = self.trajectories_tensor[i, self.h_shape:-self.a_shape]
+            a_all[0, i] = self.trajectories_tensor[i, -self.a_shape:]
+            # z_all[0, i] = np.frombuffer(key[1], dtype=np.float32)  # from shape (512,) into shape (1024,)
+            # a_all[0, i] = np.frombuffer(key[2], dtype=np.float32) 
             z_all[1:(z_s.shape[0]+1), i] = z_s
             a_all[1:(z_s.shape[0]+1), i] = a_s
-            initial_h[0, i] = np.frombuffer(key[0], dtype=np.float32)#.reshape(4096)
+            initial_h[0, i] = self.trajectories_tensor[i, :self.h_shape]
+            # initial_h[0, i] = np.frombuffer(key[0], dtype=np.float32)#.reshape(4096)
             
         # [h1, h2, ...] [zs, ...] [as, ...]
         # batch example: [h1, h2, h3]  [zs1, zs2, zs3] [as1, as2, as3]   ####### shape(sequenz, batch, 1024)
@@ -260,16 +268,10 @@ class EpisodicMemory():
         
         return (initial_h, z_all, a_all) 
 
-    # def add(self, key: tuple, value: tuple, uncertainty: float):
-    #     """ Add new trajectory """
-    #     # key: (h_t, z_t, a_t)
-    #     # value: (z_{t'}, a_{t'})
-    #     # uncertainty: float
-    #     trajectory = self.current_trajectory if self.current_trajectory else TrajectoryObject(self.trajectory_length) # z_shape, action_shape
-
-    #     trajectory.add(value)
 
     def _flatten_key(self, key: np.ndarray, from_bytes: bool = False):
+        warnings.warn("depricated!")
+        return 
         if from_bytes:
             h = np.frombuffer(key[0], dtype=np.float32).flatten()
             z = np.frombuffer(key[1], dtype=np.float32).flatten()  # from shape (512,) into shape (1024,)
@@ -282,18 +284,6 @@ class EpisodicMemory():
         res = np.concatenate([h, z, a])
         return res
 
-    def _init_hnsw(self, max_elements, dim, rebuild=False):
-        # M: max outgoing connections in graph, higher is better but slower, highly connected to dims
-        # ef_construction: construction accuracy/speed tradeoff
-        self.hnsw_storage = hnswlib.Index(space="l2", dim=dim)
-        self.hnsw_storage.init_index(max_elements, M = 16, ef_construction = 100, allow_replace_deleted=True)
-        # ef: query accuracy
-        self.hnsw_storage.set_ef(50)
-        if rebuild:
-            assert(max_elements>=len(self.trajectories))
-            keys = np.array(list(map(lambda x: self._flatten_key(x, from_bytes=True), self.trajectories.keys())))
-            self.hnsw_storage.add_items(keys)
-
     def _prune_memory(self, prune_fraction: float, uncertainty_weight: float = 0.5, time_to_live_weight: float = 0.5) -> None:
         """Prune trajectories based on weighted relevancy and prune fraction.
         Args:
@@ -301,39 +291,43 @@ class EpisodicMemory():
             uncertainty_weight (float, optional): Weighting factor for uncertainty term. Defaults to 0.5.
             time_to_live_weight (float, optional): Weighting factor for time to life term. Defaults to 0.5.
         """
-        deleted_trajs: int = 0
-
-        to_prune: int = int(len(self.trajectories) * prune_fraction)
-        # uncertainty_threshold: float = self.uncertainty_threshold
-
+        to_prune_number: int = int(self.num_trajectories * prune_fraction)
         # TODO: recalc. all uncertainties or do this in extra training?
 
-        keys = list(self.trajectories.keys())
-        values = np.array([self.trajectories[key] for key in keys])
+        # keys = list(self.trajectories.keys())
+        # values = np.array([self.trajectories[key] for key in keys])
 
         # Calculate a weighted score for each trajectory
-        ## TODO: uncertainty too small here
-        scores = uncertainty_weight * (1 - values[:, 2]) + time_to_live_weight * (self.step_counter - values[:, 3] / self.time_to_live)
-
-        # Get the indices of the trajectories with the lowest scores
-        indices_to_prune = np.argsort(scores)[-to_prune:]
-
-        # Prune the selected trajectories
-        # print("argsort(scores)  :", np.argsort(scores))
-        # print("scores           :", scores)
-        for i in indices_to_prune:
-            # print(f"prune {scores[i]}") # maybe this print does not make so much sense??
-            self.remove_traj(keys[i])
-            deleted_trajs += 1
-
-    def _add_hnsw(self, key):
-        if self.hnsw_storage.get_current_count() == self.hnsw_storage.get_max_elements():
-            print("Problem")
-        key = np.array([self._flatten_key(key, from_bytes=True)])
-        self.hnsw_storage.add_items(key)
+        ## TODO: uncertainty maybe too small here
         
+        # High score will be deleted
+        scores: torch.Tensor = uncertainty_weight * (1 - self.uncertainty) + time_to_live_weight * ((self.step_counter - self.birth_time) / self.time_to_live)
+        _, to_keep_indeces = torch.topk(scores, self.num_trajectories-to_prune_number, largest=False)  ## to_prune_mask = indices
+
+        self.trajectories_tensor = self.trajectories_tensor[to_keep_indeces]
+
+        self.traj_obj = self.traj_obj[to_keep_indeces] 
+        self.idx = self.idx[to_keep_indeces] 
+        self.uncertainty = self.uncertainty[to_keep_indeces] 
+        self.birth_time = self.birth_time[to_keep_indeces] 
+
+        self.num_trajectories -= to_prune_number
+        
+        
+    # def kNN(cloud: torch.Tensor, center: torch.Tensor, k: int = 1): # cloud: 4 dims (batch, x, y, z); center: 3 dims (x,y,z)
+    #     center = center.expand(cloud.shape)
+        
+    #     # Computing euclidean distance
+    #     dist = cloud.add( - center).pow(2).sum(dim=3).pow(.5)
+        
+    #     # Getting the k nearest points
+    #     knn_indices = dist.topk(k, largest=False, sorted=False)[1]
+        
+    #     return cloud.gather(2, knn_indices.unsqueeze(-1).repeat(1,1,1,3))
     def buildKNN(self):
         """Building internal kNN object to prevent always rebuilding when multithreaded"""
+        warnings.warn("depricated!")
+        return 
         if self.kNN_rebuild_needed:
             self.kNN_rebuild_needed = False
             
@@ -368,8 +362,9 @@ class EpisodicMemory():
                 neighbors_keys (np.array[tuple]): actual values, not the bytes anymore.
                 trajectory_first_elems (np.array): corresponding trajectories first elems - shape: (1024, k, z_size + a_size)
         """
-        import time
-
+        warnings.warn("depricated!")
+        return ([(), []])
+    
         # start = time.perf_counter_ns()
         self.buildKNN()
         # print(f"BUILD KNN duration: {(time.perf_counter_ns()- start)/1000_000}ms")
@@ -397,6 +392,20 @@ class EpisodicMemory():
 
         return (neighbors_keys, trajectory_first_elems)
 
+    def kNN_gpu(self, query: torch.Tensor, k: int) -> torch.Tensor:
+        """Return the k-NearestNeighbors (keys + trajectories) among stored trajectory keys.
+            Args:
+                query (torch.Tensor): A batch of queries.
+            Returns:
+                neighbors_keys (torch.Tensor): actual values, not the bytes anymore.
+                trajectory_first_elems (np.array): corresponding trajectories first elems - shape: (1024, k, z_size + a_size)
+        """
+        metric: str = "cosine" # "cosine" | "ip"
+        search_space: torch.Tensor = self.trajectories_tensor[:self.num_trajectories]   ## trajectories_tensor = torch.empty((self.max_elements, self.key_size), device = self.device)
+        indices, _scores = exact_search(query, search_space, k, metric=metric) ## , device=self.device
+
+        return indices
+
     def solution(self, file_path="./sheeprl/algos/dem/solution.txt"):
         try:
             with open(file_path, 'r') as file:
@@ -405,20 +414,9 @@ class EpisodicMemory():
         except FileNotFoundError as e:
             pass
         
-    def update_uncertainty(self, key: tuple[None, None, None], uncertainty: float) -> None:
-        obj, idx, _, ttl = self.trajectories[key]
-        self.trajectories[key] = (obj, idx, uncertainty, ttl)
-
-    # def kNN(self, key, k:int=1):
-    #     # key: (h_t, z_t, a_t)
-    #     Warning("For now ignore z_t.")
-
-    #     # (h_t, z_t, a_t) -> (h_t, z_t)
-    #     # entries = np.array([[k[0], k[1]] for k in self.trajectories.keys()])
-
-
-    #     # return k nearest neighbors based on some distance metric
-    #     raise NotImplementedError("kNN method not implemented yet.")
+    def update_uncertainty(self, uncertainties: torch.Tensor) -> None:
+        """Called in rehearsal training, updating uncertainty of ALL trajectories."""
+        self.uncertainty = uncertainties
     
 class TrajectoryObject:
     """
@@ -443,7 +441,8 @@ class TrajectoryObject:
         
         self.free_space: int = trajectory_length
         """How much free space this object still has. Always resets if new trajectory starts."""
-        self.memory: np.array = np.ones((trajectory_length, self.memory_width), dtype=np.float32)  # TODO: add size of tuple (z_t', a_t') ~ 1024+6 TODO: add to device when using tensors?
+        # self.memory: np.array = np.ones((trajectory_length, self.memory_width), dtype=np.float32)  # TODO: add size of tuple (z_t', a_t') ~ 1024+6 TODO: add to device when using tensors?
+        self.memory: torch.Tensor = torch.ones((trajectory_length, self.memory_width), dtype=torch.float32, device=device)
         """"The actual trajectories."""
 
         # self.traj_num_to_offset : np.array = np.zeros((self.traj_num_to_offset_size_increase,), dtype=int) # 10 is test value for now
@@ -468,7 +467,8 @@ class TrajectoryObject:
         #         axis=0
         #     )
 
-        self.memory = np.concatenate((self.memory, np.ones((self.trajectory_length-self.free_space, self.memory_width), dtype=np.float32)), axis=0) # possible if lenght-freespace = 0 ??? # TODO: add size of tuple (z_t', a_t')
+        # possible if lenght-freespace = 0 ??? # TODO: add size of tuple (z_t', a_t')
+        self.memory = torch.concatenate((self.memory, torch.ones((self.trajectory_length-self.free_space, self.memory_width), dtype=torch.float32, device=self.device)), axis=0)
         self.free_space = self.trajectory_length
         # self.traj_num_to_offset[nr_idx] = self.last_idx()
         
@@ -489,48 +489,24 @@ class TrajectoryObject:
         Args:
             traj_nr (int): internal trajectory number to delete.
         """
-        # start_idx = self.traj_num_to_offset[traj_nr-1]+self.trajectory_length if traj_nr-1 >=0 else 0
-        # end_idx = self.traj_num_to_offset[traj_nr+1] if traj_nr < self.traj_num_to_offset.shape[0]-1 else self.memory.shape[0]
-        
         prev = self.traj_num_mapping.get_prev_index(traj_nr)
         start_idx = 0 if prev == -1 else self.traj_num_mapping[prev] + self.trajectory_length
 
         next_ = self.traj_num_mapping.get_next_index(traj_nr)
         end_idx = self.memory.shape[0] if next_ == -1 else self.traj_num_mapping[next_] 
 
-        # [0,3,5,10,12]
-        # del 2
-        # [0,3,5,5,7]
-        # [0,3,5,10,12]
-        # print("DELETE TRAJ NR:", traj_nr, " FROM ", start_idx, " TO ", end_idx)
-
         to_delete = (end_idx - start_idx)
-        # 8-3 = 5
-        # 0 to 10 = 11 elements
-        # 0to 2 + 8to 10 = 3 + 6 elements
         
         if to_delete > 0:
-            # if self.memory.shape[0] != end_idx:
             ## np.concatenate([array([], dtype=int64), array([2, 3, 4])], axis=0) -> array([2, 3, 4]) ~Good
-            self.memory = np.concatenate([self.memory[:start_idx], self.memory[end_idx:]], axis = 0) # +1-1*1/1????
-            # elif start_idx == 0:
-            #     self.memory = self.memory[end_idx:]
-            # else:
-            #     self.memory = self.memory[:start_idx]
-
+            # self.memory = torch.concatenate([self.memory[:start_idx], self.memory[end_idx:]], axis = 0) # +1-1*1/1????
+            ### safe good :)):
+            self.memory[start_idx:end_idx] = self.memory[start_idx+end_idx:]
+            self.memory = self.memory[:start_idx+end_idx]
             # decrement following trajectory indices by length of deleted trajectory, if not last element
             if next_ != -1:
                 self.traj_num_mapping.add_to_all_following(traj_nr, -(end_idx - start_idx))
-                # temp = np.zeros_like(self.traj_num_to_offset)
-                # temp[traj_nr+1:] = (end_idx - start_idx)
-
-                # self.traj_num_to_offset -= temp
-            # traj_nr marks the last trajectory
             else:
-                if prev != -1:
-                    new_length = self.traj_num_mapping[prev] + self.trajectory_length
-                else:
-                    new_length = 1
                 self.traj_num_mapping.delete(traj_nr)
 
                 self.free_space = max(0, self.last_idx() - start_idx)
@@ -543,7 +519,7 @@ class TrajectoryObject:
             self.traj_num_mapping.delete(traj_nr)
             self.kNN_rebuild_needed = True
             
-    def add(self, value: np.array) -> int:
+    def add(self, z: torch.Tensor, a: torch.Tensor) -> int:
         """ Add a value into the trajectory.
                 
         Args:
@@ -553,15 +529,9 @@ class TrajectoryObject:
             free_space (int): The remaining free space.
         """
         self.kNN_rebuild_needed = True
-        self.memory[-self.free_space] = value # TODO: add tuple (z_t', a_t') |IndexError: index -5 is out of bounds for axis 0 with size 1
+        self.memory[-self.free_space][:self.z_shape] = z
+        self.memory[-self.free_space][-self.a_shape:] = a
         self.free_space -= 1
-        # print("ADD VALUE:", value)
-        # print("memory: ", type(self.memory[0]))
-        # print(type(self.memory))
-
-        # ADD VALUE: (array([[[0., 0., 0., ..., 0., 0., 0.]]], dtype=float32), array([[2]]))
-        # memory:  <class 'numpy.ndarray'>
-        # <class 'numpy.ndarray'>
         return self.free_space
 
     def last_idx(self):
@@ -571,25 +541,12 @@ class TrajectoryObject:
     def __str__(self):
         return f"TrajectoryObj| Free space: {self.free_space}| Trajectory length: {self.trajectory_length}"
     
-    def get_trajectory(self, traj_nr) -> np.array:
+    def get_trajectory(self, traj_nr) -> torch.Tensor:
         """Returns a specific trajectory in full"""
         start_idx = self.traj_num_mapping[traj_nr]
         end_idx = min(self.last_idx()+1, start_idx + self.trajectory_length)
         # print("get_traj: ", start_idx, end_idx, self.last_idx(), start_idx + self.trajectory_length)
         return self.memory[start_idx:end_idx]
-    
-    # depricated
-    # def get_all_trajectories(self) -> list[np.array]:
-    #     """Return a list of all trajecotries, without indices"""
-    #     trajectories = []
-
-    #     for traj_nr in range(self.num_trajectories):
-    #         start_idx = self.traj_num_to_offset[traj_nr-1]+self.trajectory_length if traj_nr-1 >=0 else 0
-    #         end_idx = start_idx + self.trajectory_length
-
-    #         trajectories.append(np.array(self.memory[start_idx:end_idx]))
-        
-    #     return trajectories
 
 class Map():
     """ Is doing stuff.
@@ -697,10 +654,6 @@ class Map():
 #         # --- kNN ---
 #         idxs = np.argsort(dist)[:k]
 #         return idxs, dist[idxs]
-
-
-
-
 
 # import torch
 

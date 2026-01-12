@@ -49,7 +49,8 @@ import pkgutil
 # os.environ["HYDRA_FULL_ERROR"] = "1"
 
 from sheeprl.algos.dem.utils import additive_correction_delta, parallel_additive_correction_delta
-from sheeprl.algos.dem.episodic_memory import EpisodicMemory as EM
+# from sheeprl.algos.dem.episodic_memory import EpisodicMemory as EM
+from sheeprl.algos.dem.episodic_memory_gpu import GPUEpisodicMemory as EM
 
 # Decomment the following two lines if you cannot start an experiment with DMC environments
 # os.environ["PYOPENGL_PLATFORM"] = ""
@@ -703,7 +704,8 @@ def main(fabric: Fabric, cfg: Dict[str, Any]):
         time_to_live = cfg.episodic_memory.time_to_live, 
         z_shape=cfg.algo.world_model.discrete_size*cfg.algo.world_model.stochastic_size,
         h_shape=cfg.algo.world_model.recurrent_model.recurrent_state_size,
-        a_shape=actions_dim, # TODO not sure if shape is correct
+        a_shape=actions_dim, # TODO not sure if shape is correct,
+        fabric=fabric
     )
 
     # Metrics
@@ -845,9 +847,9 @@ def main(fabric: Fabric, cfg: Dict[str, Any]):
                     ### here and probably during rehearsal training, we need the (1,x) shape, but within the lookup in side the predictor (x,)
                     ### So need to discuss how to store them, (or more, how to restore)
                     actions, h, z_logits, uncertainty = player.get_actions(torch_obs, mask=mask, return_rssm_stuff=True)
-                    h, z_logits = h.cpu().numpy(), z_logits.cpu().numpy()
+                    # h, z_logits = h.cpu().numpy(), z_logits.cpu().numpy()
                     real_actions = actions
-                    actions = torch.cat(actions, -1).cpu().numpy()
+                    actions = torch.cat(actions, -1)
                     if is_continuous:
                         real_actions = torch.stack(real_actions, dim=-1).cpu().numpy()
                     else:
@@ -870,8 +872,13 @@ def main(fabric: Fabric, cfg: Dict[str, Any]):
                 
                 # em_insert_threshold = np.percentile(last_N_env_uncertainties, cfg.episodic_memory.percentile_treshold)
                 # episodic_memory.set_threshold(em_insert_threshold)
+                
+                if type(actions) != np.ndarray:
+                    step_data["actions"] = actions.reshape((1, cfg.env.num_envs, -1)).cpu().numpy()
+                else:
+                    step_data["actions"] = actions.reshape((1, cfg.env.num_envs, -1))
+                    actions = torch.from_numpy(actions).to(device=device)
 
-                step_data["actions"] = actions.reshape((1, cfg.env.num_envs, -1))
                 rb.add(step_data, validate_args=cfg.buffer.validate_args)
 
                 ### actual interaction with the environment:
@@ -900,16 +907,25 @@ def main(fabric: Fabric, cfg: Dict[str, Any]):
                     # print(f"  rewards:      {rewards.shape}")
                     # print(f"  dones:        {dones.shape}")
                     # print(episodic_memory)
-
                 ## Update Episodic Memory
                 # uncertainty = np.array([0.8])
+                if iter_num > learning_starts:
+                    print(f"shapes: {h} {z_logits}")
                 if cfg.episodic_memory.enable_rehersal_training:
                     episodic_memory.step(
-                        state={"deter": h, "stoch": z_logits},
-                        action=actions,
+                        h=h,
+                        z=z_logits,
+                        a=actions,
                         uncertainty=uncertainty,
                         done=dones
                     )
+                    # episodic_memory.step(
+                    #     state={"deter": h, "stoch": z_logits},
+                    #     action=actions,
+                    #     uncertainty=uncertainty,
+                    #     done=dones
+                    # )
+
 
             step_data["is_first"] = np.zeros_like(step_data["terminated"])
             if "restart_on_exception" in infos:

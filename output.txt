@@ -1,0 +1,506 @@
+Log dir: logs/runs/dem/PongNoFrameskip-v4/2026-01-12_17-59-34_dem_PongNoFrameskip-v4_5/version_0
+Encoder CNN keys: ['rgb']
+Encoder MLP keys: []
+Decoder CNN keys: ['rgb']
+Decoder MLP keys: []
+Rank-0: policy_step=930, reward_env_0=-19.0
+Behaviour Learning ~Actor-Critic stuff
+imag duration: 13.309578ms
+calc ACD: 1024 times
+parallel additive_correction_delta duration: 0.04874ms for EM of size: 0
+calculated ACDs shape: torch.Size([5, 1024])
+dream lookup threshold is: 1.851059994623065
+imag duration: 6.71789ms
+calc ACD: 1024 times
+parallel additive_correction_delta duration: 0.060721ms for EM of size: 0
+calculated ACDs shape: torch.Size([5, 1024])
+dream lookup threshold is: 1.8742025335036219
+imag duration: 6.877901ms
+calc ACD: 1024 times
+parallel additive_correction_delta duration: 0.059881ms for EM of size: 0
+calculated ACDs shape: torch.Size([5, 1024])
+dream lookup threshold is: 1.8725934143259153
+imag duration: 6.656209ms
+calc ACD: 1024 times
+parallel additive_correction_delta duration: 0.045511ms for EM of size: 0
+calculated ACDs shape: torch.Size([5, 1024])
+dream lookup threshold is: 1.8709738677396317
+imag duration: 6.928452ms
+calc ACD: 1024 times
+parallel additive_correction_delta duration: 0.05518ms for EM of size: 0
+calculated ACDs shape: torch.Size([5, 1024])
+dream lookup threshold is: 1.87551975240375
+imag duration: 6.835611ms
+calc ACD: 1024 times
+parallel additive_correction_delta duration: 0.039571ms for EM of size: 0
+calculated ACDs shape: torch.Size([5, 1024])
+dream lookup threshold is: 1.8799606289704707
+imag duration: 6.75492ms
+calc ACD: 1024 times
+parallel additive_correction_delta duration: 0.04407ms for EM of size: 0
+calculated ACDs shape: torch.Size([5, 1024])
+dream lookup threshold is: 1.8737244059406122
+imag duration: 6.67941ms
+calc ACD: 1024 times
+parallel additive_correction_delta duration: 0.039311ms for EM of size: 0
+calculated ACDs shape: torch.Size([5, 1024])
+dream lookup threshold is: 1.868235900675021
+imag duration: 6.589688ms
+calc ACD: 1024 times
+parallel additive_correction_delta duration: 0.047341ms for EM of size: 0
+calculated ACDs shape: torch.Size([5, 1024])
+dream lookup threshold is: 1.872323286455619
+imag duration: 6.77759ms
+calc ACD: 1024 times
+parallel additive_correction_delta duration: 0.0449ms for EM of size: 0
+calculated ACDs shape: torch.Size([5, 1024])
+dream lookup threshold is: 1.8774003302745197
+imag duration: 6.534678ms
+calc ACD: 1024 times
+parallel additive_correction_delta duration: 0.056601ms for EM of size: 0
+calculated ACDs shape: torch.Size([5, 1024])
+dream lookup threshold is: 1.8714211226907296
+imag duration: 6.854531ms
+calc ACD: 1024 times
+parallel additive_correction_delta duration: 0.056231ms for EM of size: 0
+calculated ACDs shape: torch.Size([5, 1024])
+dream lookup threshold is: 1.8780567486002118
+imag duration: 6.551838ms
+calc ACD: 1024 times
+parallel additive_correction_delta duration: 0.052321ms for EM of size: 0
+calculated ACDs shape: torch.Size([5, 1024])
+dream lookup threshold is: 1.8753501580545446
+imag duration: 6.666629ms
+calc ACD: 1024 times
+parallel additive_correction_delta duration: 0.04049ms for EM of size: 0
+calculated ACDs shape: torch.Size([5, 1024])
+dream lookup threshold is: 1.8766556021882983
+imag duration: 6.79276ms
+calc ACD: 1024 times
+parallel additive_correction_delta duration: 0.04154ms for EM of size: 0
+calculated ACDs shape: torch.Size([5, 1024])
+dream lookup threshold is: 1.8752603795501728
+Env Uncertaitny: 1.2835599482059479
+EM read threshold set to: 0.12303554359823465
+shapes: tensor([[[ 0.0488, -0.0176, -0.1826,  ...,  0.0901,  0.0529, -0.0845]]],
+       device='cuda:0') tensor([[-4.4576, -3.9078, -3.7542,  ..., -3.7133, -2.9763, -4.9321]],
+       device='cuda:0')
+Behaviour Learning ~Actor-Critic stuff
+imag duration: 94.461869ms
+calc ACD: 1024 times
+parallel additive_correction_delta duration: 0.03839ms for EM of size: 0
+calculated ACDs shape: torch.Size([5, 1024])
+dream lookup threshold is: 1.791646589934826
+imag duration: 6.576458ms
+calc ACD: 1024 times
+parallel additive_correction_delta duration: 0.03209ms for EM of size: 0
+calculated ACDs shape: torch.Size([5, 1024])
+dream lookup threshold is: 1.8068279630452395
+imag duration: 6.672679ms
+calc ACD: 1024 times
+parallel additive_correction_delta duration: 0.03252ms for EM of size: 0
+calculated ACDs shape: torch.Size([5, 1024])
+dream lookup threshold is: 1.8075964830135407
+imag duration: 6.637499ms
+calc ACD: 1024 times
+parallel additive_correction_delta duration: 0.03143ms for EM of size: 0
+calculated ACDs shape: torch.Size([5, 1024])
+dream lookup threshold is: 1.8057412741400949
+imag duration: 6.556748ms
+calc ACD: 1024 times
+parallel additive_correction_delta duration: 0.03101ms for EM of size: 0
+calculated ACDs shape: torch.Size([5, 1024])
+dream lookup threshold is: 1.8002069597073576
+imag duration: 6.67732ms
+calc ACD: 1024 times
+parallel additive_correction_delta duration: 0.03208ms for EM of size: 0
+calculated ACDs shape: torch.Size([5, 1024])
+dream lookup threshold is: 1.8016446668700656
+imag duration: 6.602219ms
+calc ACD: 1024 times
+parallel additive_correction_delta duration: 0.03618ms for EM of size: 0
+calculated ACDs shape: torch.Size([5, 1024])
+dream lookup threshold is: 1.8068981592245859
+imag duration: 6.546208ms
+calc ACD: 1024 times
+parallel additive_correction_delta duration: 0.03262ms for EM of size: 0
+calculated ACDs shape: torch.Size([5, 1024])
+dream lookup threshold is: 1.8100170980884513
+imag duration: 6.569948ms
+calc ACD: 1024 times
+parallel additive_correction_delta duration: 0.033751ms for EM of size: 0
+calculated ACDs shape: torch.Size([5, 1024])
+dream lookup threshold is: 1.8091611964662808
+imag duration: 6.603648ms
+calc ACD: 1024 times
+parallel additive_correction_delta duration: 0.032451ms for EM of size: 0
+calculated ACDs shape: torch.Size([5, 1024])
+dream lookup threshold is: 1.8121435988974175
+imag duration: 6.563138ms
+calc ACD: 1024 times
+parallel additive_correction_delta duration: 0.03136ms for EM of size: 0
+calculated ACDs shape: torch.Size([5, 1024])
+dream lookup threshold is: 1.810167381365132
+imag duration: 6.587898ms
+calc ACD: 1024 times
+parallel additive_correction_delta duration: 0.03269ms for EM of size: 0
+calculated ACDs shape: torch.Size([5, 1024])
+dream lookup threshold is: 1.8115827156772117
+imag duration: 6.579259ms
+calc ACD: 1024 times
+parallel additive_correction_delta duration: 0.03377ms for EM of size: 0
+calculated ACDs shape: torch.Size([5, 1024])
+dream lookup threshold is: 1.8082415368543763
+imag duration: 6.593999ms
+calc ACD: 1024 times
+parallel additive_correction_delta duration: 0.03256ms for EM of size: 0
+calculated ACDs shape: torch.Size([5, 1024])
+dream lookup threshold is: 1.8202003023588527
+imag duration: 6.624228ms
+calc ACD: 1024 times
+parallel additive_correction_delta duration: 0.143472ms for EM of size: 0
+calculated ACDs shape: torch.Size([5, 1024])
+dream lookup threshold is: 1.8194091439312339
+Env Uncertaitny: 1.2783387303352356
+EM read threshold set to: 0.17887793108820915
+shapes: tensor([[[-0.2300, -0.0617, -0.2226,  ...,  0.0895,  0.3026, -0.1223]]],
+       device='cuda:0') tensor([[-4.4002, -3.9036, -3.5424,  ..., -3.9239, -3.4434, -4.8982]],
+       device='cuda:0')
+Behaviour Learning ~Actor-Critic stuff
+imag duration: 92.386778ms
+calc ACD: 1024 times
+parallel additive_correction_delta duration: 0.03491ms for EM of size: 1
+calculated ACDs shape: torch.Size([5, 1024])
+dream lookup threshold is: 1.74971639290452
+imag duration: 6.312205ms
+calc ACD: 1024 times
+parallel additive_correction_delta duration: 0.028591ms for EM of size: 1
+calculated ACDs shape: torch.Size([5, 1024])
+dream lookup threshold is: 1.7571961317881941
+imag duration: 6.332975ms
+calc ACD: 1024 times
+parallel additive_correction_delta duration: 0.02747ms for EM of size: 1
+calculated ACDs shape: torch.Size([5, 1024])
+dream lookup threshold is: 1.7539347157969327
+imag duration: 6.251894ms
+calc ACD: 1024 times
+parallel additive_correction_delta duration: 0.026821ms for EM of size: 1
+calculated ACDs shape: torch.Size([5, 1024])
+dream lookup threshold is: 1.7528002488325976
+imag duration: 6.261725ms
+calc ACD: 1024 times
+parallel additive_correction_delta duration: 0.027991ms for EM of size: 1
+calculated ACDs shape: torch.Size([5, 1024])
+dream lookup threshold is: 1.7477675158557404
+imag duration: 6.265405ms
+calc ACD: 1024 times
+parallel additive_correction_delta duration: 0.02658ms for EM of size: 1
+calculated ACDs shape: torch.Size([5, 1024])
+dream lookup threshold is: 1.7441973551400274
+imag duration: 6.311666ms
+calc ACD: 1024 times
+parallel additive_correction_delta duration: 0.02764ms for EM of size: 1
+calculated ACDs shape: torch.Size([5, 1024])
+dream lookup threshold is: 1.746746857105978
+imag duration: 6.284446ms
+calc ACD: 1024 times
+parallel additive_correction_delta duration: 0.026941ms for EM of size: 1
+calculated ACDs shape: torch.Size([5, 1024])
+dream lookup threshold is: 1.7402215347105194
+imag duration: 6.264895ms
+calc ACD: 1024 times
+parallel additive_correction_delta duration: 0.03235ms for EM of size: 1
+calculated ACDs shape: torch.Size([5, 1024])
+dream lookup threshold is: 1.744126984820181
+imag duration: 6.277335ms
+calc ACD: 1024 times
+parallel additive_correction_delta duration: 0.027601ms for EM of size: 1
+calculated ACDs shape: torch.Size([5, 1024])
+dream lookup threshold is: 1.7411528463844996
+imag duration: 6.423446ms
+calc ACD: 1024 times
+parallel additive_correction_delta duration: 0.028551ms for EM of size: 1
+calculated ACDs shape: torch.Size([5, 1024])
+dream lookup threshold is: 1.7412058793114469
+imag duration: 6.305405ms
+calc ACD: 1024 times
+parallel additive_correction_delta duration: 0.028ms for EM of size: 1
+calculated ACDs shape: torch.Size([5, 1024])
+dream lookup threshold is: 1.7445756457076538
+imag duration: 6.322685ms
+calc ACD: 1024 times
+parallel additive_correction_delta duration: 0.03062ms for EM of size: 1
+calculated ACDs shape: torch.Size([5, 1024])
+dream lookup threshold is: 1.7429987553127866
+imag duration: 6.335446ms
+calc ACD: 1024 times
+parallel additive_correction_delta duration: 0.036251ms for EM of size: 1
+calculated ACDs shape: torch.Size([5, 1024])
+dream lookup threshold is: 1.7422800317291103
+imag duration: 6.601218ms
+calc ACD: 1024 times
+parallel additive_correction_delta duration: 0.038601ms for EM of size: 1
+calculated ACDs shape: torch.Size([5, 1024])
+dream lookup threshold is: 1.748151376947645
+Env Uncertaitny: 1.1878740787506104
+EM read threshold set to: 0.21851367875933647
+shapes: tensor([[[-0.0011, -0.1498, -0.3237,  ...,  0.1485,  0.5027, -0.0914]]],
+       device='cuda:0') tensor([[-4.4712, -3.8497, -3.5308,  ..., -4.0905, -3.6854, -4.8876]],
+       device='cuda:0')
+Behaviour Learning ~Actor-Critic stuff
+imag duration: 94.658952ms
+calc ACD: 1024 times
+parallel additive_correction_delta duration: 0.038211ms for EM of size: 2
+calculated ACDs shape: torch.Size([5, 1024])
+dream lookup threshold is: 1.7043675769865512
+imag duration: 6.594488ms
+calc ACD: 1024 times
+parallel additive_correction_delta duration: 0.03838ms for EM of size: 2
+calculated ACDs shape: torch.Size([5, 1024])
+dream lookup threshold is: 1.7124574503198267
+imag duration: 6.608929ms
+calc ACD: 1024 times
+parallel additive_correction_delta duration: 0.032391ms for EM of size: 2
+calculated ACDs shape: torch.Size([5, 1024])
+dream lookup threshold is: 1.7103247890083937
+imag duration: 6.675069ms
+calc ACD: 1024 times
+parallel additive_correction_delta duration: 0.03534ms for EM of size: 2
+calculated ACDs shape: torch.Size([5, 1024])
+dream lookup threshold is: 1.7120068193467546
+imag duration: 6.453637ms
+calc ACD: 1024 times
+parallel additive_correction_delta duration: 0.04496ms for EM of size: 2
+calculated ACDs shape: torch.Size([5, 1024])
+dream lookup threshold is: 1.7067224768261036
+imag duration: 6.655539ms
+calc ACD: 1024 times
+parallel additive_correction_delta duration: 0.033201ms for EM of size: 2
+calculated ACDs shape: torch.Size([5, 1024])
+dream lookup threshold is: 1.7006595855330031
+imag duration: 6.863131ms
+calc ACD: 1024 times
+parallel additive_correction_delta duration: 0.03499ms for EM of size: 2
+calculated ACDs shape: torch.Size([5, 1024])
+dream lookup threshold is: 1.7102334379905209
+imag duration: 6.617209ms
+calc ACD: 1024 times
+parallel additive_correction_delta duration: 0.031851ms for EM of size: 2
+calculated ACDs shape: torch.Size([5, 1024])
+dream lookup threshold is: 1.7071516667602
+imag duration: 6.548568ms
+calc ACD: 1024 times
+parallel additive_correction_delta duration: 0.03535ms for EM of size: 2
+calculated ACDs shape: torch.Size([5, 1024])
+dream lookup threshold is: 1.7048662263947703
+imag duration: 6.73895ms
+calc ACD: 1024 times
+parallel additive_correction_delta duration: 0.03662ms for EM of size: 2
+calculated ACDs shape: torch.Size([5, 1024])
+dream lookup threshold is: 1.7077609488703787
+imag duration: 6.605958ms
+calc ACD: 1024 times
+parallel additive_correction_delta duration: 0.031771ms for EM of size: 2
+calculated ACDs shape: torch.Size([5, 1024])
+dream lookup threshold is: 1.7110230878386279
+imag duration: 6.75224ms
+calc ACD: 1024 times
+parallel additive_correction_delta duration: 0.03259ms for EM of size: 2
+calculated ACDs shape: torch.Size([5, 1024])
+dream lookup threshold is: 1.7090054481033419
+imag duration: 6.73728ms
+calc ACD: 1024 times
+parallel additive_correction_delta duration: 0.03466ms for EM of size: 2
+calculated ACDs shape: torch.Size([5, 1024])
+dream lookup threshold is: 1.7064466554212607
+imag duration: 6.67039ms
+calc ACD: 1024 times
+parallel additive_correction_delta duration: 0.03517ms for EM of size: 2
+calculated ACDs shape: torch.Size([5, 1024])
+dream lookup threshold is: 1.7041343294116735
+imag duration: 7.254025ms
+calc ACD: 1024 times
+parallel additive_correction_delta duration: 0.03566ms for EM of size: 2
+calculated ACDs shape: torch.Size([5, 1024])
+dream lookup threshold is: 1.701874654881689
+Env Uncertaitny: 1.3729573786258698
+EM read threshold set to: 0.263150941580534
+shapes: tensor([[[ 0.0368, -0.1443, -0.3991,  ...,  0.1479,  0.4855, -0.2094]]],
+       device='cuda:0') tensor([[-4.5689, -3.9589, -3.6039,  ..., -4.3034, -3.8844, -4.8858]],
+       device='cuda:0')
+Behaviour Learning ~Actor-Critic stuff
+imag duration: 99.007827ms
+calc ACD: 1024 times
+parallel additive_correction_delta duration: 0.04407ms for EM of size: 3
+calculated ACDs shape: torch.Size([5, 1024])
+dream lookup threshold is: 1.710968514829874
+imag duration: 6.77674ms
+calc ACD: 1024 times
+parallel additive_correction_delta duration: 0.04126ms for EM of size: 3
+calculated ACDs shape: torch.Size([5, 1024])
+dream lookup threshold is: 1.7259918624714017
+imag duration: 7.091103ms
+calc ACD: 1024 times
+parallel additive_correction_delta duration: 0.039451ms for EM of size: 3
+calculated ACDs shape: torch.Size([5, 1024])
+dream lookup threshold is: 1.7222352694218903
+imag duration: 6.73453ms
+calc ACD: 1024 times
+parallel additive_correction_delta duration: 0.03999ms for EM of size: 3
+calculated ACDs shape: torch.Size([5, 1024])
+dream lookup threshold is: 1.7203502180385049
+imag duration: 6.999833ms
+calc ACD: 1024 times
+parallel additive_correction_delta duration: 0.04319ms for EM of size: 3
+calculated ACDs shape: torch.Size([5, 1024])
+dream lookup threshold is: 1.7201816037021154
+imag duration: 6.7229ms
+calc ACD: 1024 times
+parallel additive_correction_delta duration: 0.03638ms for EM of size: 3
+calculated ACDs shape: torch.Size([5, 1024])
+dream lookup threshold is: 1.7165692551878313
+imag duration: 6.882982ms
+calc ACD: 1024 times
+parallel additive_correction_delta duration: 0.035911ms for EM of size: 3
+calculated ACDs shape: torch.Size([5, 1024])
+dream lookup threshold is: 1.7236682817627462
+imag duration: 6.633099ms
+calc ACD: 1024 times
+parallel additive_correction_delta duration: 0.04105ms for EM of size: 3
+calculated ACDs shape: torch.Size([5, 1024])
+dream lookup threshold is: 1.7199839427027002
+imag duration: 6.716399ms
+calc ACD: 1024 times
+parallel additive_correction_delta duration: 0.043591ms for EM of size: 3
+calculated ACDs shape: torch.Size([5, 1024])
+dream lookup threshold is: 1.7170373410721151
+imag duration: 6.938272ms
+calc ACD: 1024 times
+parallel additive_correction_delta duration: 0.04125ms for EM of size: 3
+calculated ACDs shape: torch.Size([5, 1024])
+dream lookup threshold is: 1.7218929092444375
+imag duration: 6.646569ms
+calc ACD: 1024 times
+parallel additive_correction_delta duration: 0.03083ms for EM of size: 3
+calculated ACDs shape: torch.Size([5, 1024])
+dream lookup threshold is: 1.7194569447739494
+imag duration: 6.701019ms
+calc ACD: 1024 times
+parallel additive_correction_delta duration: 0.03762ms for EM of size: 3
+calculated ACDs shape: torch.Size([5, 1024])
+dream lookup threshold is: 1.7200709548981026
+imag duration: 6.424787ms
+calc ACD: 1024 times
+parallel additive_correction_delta duration: 0.034591ms for EM of size: 3
+calculated ACDs shape: torch.Size([5, 1024])
+dream lookup threshold is: 1.724978194278867
+imag duration: 6.588468ms
+calc ACD: 1024 times
+parallel additive_correction_delta duration: 0.04513ms for EM of size: 3
+calculated ACDs shape: torch.Size([5, 1024])
+dream lookup threshold is: 1.722529034397427
+imag duration: 6.922602ms
+calc ACD: 1024 times
+parallel additive_correction_delta duration: 0.04035ms for EM of size: 3
+calculated ACDs shape: torch.Size([5, 1024])
+dream lookup threshold is: 1.7207160806961996
+Env Uncertaitny: 1.1942121386528015
+EM read threshold set to: 0.2944934517145157
+shapes: tensor([[[ 0.1107, -0.2178, -0.4546,  ...,  0.1546,  0.4672, -0.0332]]],
+       device='cuda:0') tensor([[-4.6288, -4.0245, -3.5961,  ..., -4.4064, -4.1169, -4.9866]],
+       device='cuda:0')
+Behaviour Learning ~Actor-Critic stuff
+imag duration: 93.56623ms
+calc ACD: 1024 times
+parallel additive_correction_delta duration: 0.05169ms for EM of size: 4
+calculated ACDs shape: torch.Size([5, 1024])
+dream lookup threshold is: 1.76166074372828
+imag duration: 6.838011ms
+calc ACD: 1024 times
+parallel additive_correction_delta duration: 0.048121ms for EM of size: 4
+calculated ACDs shape: torch.Size([5, 1024])
+dream lookup threshold is: 1.7767013676859438
+imag duration: 6.892692ms
+calc ACD: 1024 times
+parallel additive_correction_delta duration: 0.037031ms for EM of size: 4
+calculated ACDs shape: torch.Size([5, 1024])
+dream lookup threshold is: 1.771486358113982
+imag duration: 6.888821ms
+calc ACD: 1024 times
+parallel additive_correction_delta duration: 0.055421ms for EM of size: 4
+calculated ACDs shape: torch.Size([5, 1024])
+dream lookup threshold is: 1.7689664020515272
+imag duration: 6.581088ms
+calc ACD: 1024 times
+parallel additive_correction_delta duration: 0.043851ms for EM of size: 4
+calculated ACDs shape: torch.Size([5, 1024])
+dream lookup threshold is: 1.7760488029116162
+imag duration: 6.75453ms
+calc ACD: 1024 times
+parallel additive_correction_delta duration: 0.03694ms for EM of size: 4
+calculated ACDs shape: torch.Size([5, 1024])
+dream lookup threshold is: 1.7733642499256073
+imag duration: 6.79139ms
+calc ACD: 1024 times
+parallel additive_correction_delta duration: 0.03739ms for EM of size: 4
+calculated ACDs shape: torch.Size([5, 1024])
+dream lookup threshold is: 1.776393762122202
+imag duration: 6.71362ms
+calc ACD: 1024 times
+parallel additive_correction_delta duration: 0.03235ms for EM of size: 4
+calculated ACDs shape: torch.Size([5, 1024])
+dream lookup threshold is: 1.7674826171089273
+imag duration: 6.627629ms
+calc ACD: 1024 times
+parallel additive_correction_delta duration: 0.065241ms for EM of size: 4
+calculated ACDs shape: torch.Size([5, 1024])
+dream lookup threshold is: 1.7735958551725637
+imag duration: 6.579488ms
+calc ACD: 1024 times
+parallel additive_correction_delta duration: 0.04259ms for EM of size: 4
+calculated ACDs shape: torch.Size([5, 1024])
+dream lookup threshold is: 1.7756653083169072
+imag duration: 6.884461ms
+calc ACD: 1024 times
+parallel additive_correction_delta duration: 0.049081ms for EM of size: 4
+calculated ACDs shape: torch.Size([5, 1024])
+dream lookup threshold is: 1.772830303860509
+imag duration: 6.876701ms
+calc ACD: 1024 times
+parallel additive_correction_delta duration: 0.04063ms for EM of size: 4
+calculated ACDs shape: torch.Size([5, 1024])
+dream lookup threshold is: 1.7703401741023144
+imag duration: 6.83696ms
+calc ACD: 1024 times
+parallel additive_correction_delta duration: 0.04064ms for EM of size: 4
+calculated ACDs shape: torch.Size([5, 1024])
+dream lookup threshold is: 1.776949941438074
+imag duration: 7.375207ms
+calc ACD: 1024 times
+parallel additive_correction_delta duration: 0.04436ms for EM of size: 4
+calculated ACDs shape: torch.Size([5, 1024])
+dream lookup threshold is: 1.7754816532812678
+imag duration: 6.855271ms
+calc ACD: 1024 times
+parallel additive_correction_delta duration: 0.042391ms for EM of size: 4
+calculated ACDs shape: torch.Size([5, 1024])
+dream lookup threshold is: 1.7700291805423123
+Env Uncertaitny: 1.1128602921962738
+EM read threshold set to: 0.3204123117029667
+shapes: tensor([[[ 0.2192, -0.2948, -0.5621,  ...,  0.1562,  0.6771,  0.0370]]],
+       device='cuda:0') tensor([[-4.6230, -4.0373, -3.5772,  ..., -4.4337, -4.2065, -4.9848]],
+       device='cuda:0')
+Behaviour Learning ~Actor-Critic stuff
+imag duration: 95.670492ms
+calc ACD: 1024 times
+Device=cuda, metric=cosine, Q=1024x5126, D=5x5126, batch_size=1024, doc_rows=5, k=5, dtype=torch.float32
+Processed queries 0:1024 (100.0%)
+Done in 0.01s
+indices: tensor([4, 3, 2,  ..., 2, 1, 0])
+episodic_memory.traj_obj[indices]: [<sheeprl.algos.dem.episodic_memory_gpu.TrajectoryObject object at 0x7f5c0e53a140>
+ <sheeprl.algos.dem.episodic_memory_gpu.TrajectoryObject object at 0x7f5c0e53a140>
+ <sheeprl.algos.dem.episodic_memory_gpu.TrajectoryObject object at 0x7f5c0e53a140>
+ ...
+ <sheeprl.algos.dem.episodic_memory_gpu.TrajectoryObject object at 0x7f5c0e53a140>
+ <sheeprl.algos.dem.episodic_memory_gpu.TrajectoryObject object at 0x7f5c0e53a140>
+ <sheeprl.algos.dem.episodic_memory_gpu.TrajectoryObject object at 0x7f5c0e53a140>]

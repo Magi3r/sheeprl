@@ -2438,16 +2438,6 @@ other = [
 ]
 
 [[package]]
-name = "hnswlib"
-version = "0.8.0"
-source = { registry = "https://pypi.org/simple" }
-dependencies = [
-    { name = "numpy", version = "1.24.4", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.9'" },
-    { name = "numpy", version = "1.26.4", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.9'" },
-]
-sdist = { url = "https://files.pythonhosted.org/packages/cf/7a/1a9b1405f2eb59515f06c3074750b03e0e96edf7fee0f6dd6df81d9c21d7/hnswlib-0.8.0.tar.gz", hash = "sha256:cb6d037eedebb34a7134e7dc78966441dfd04c9cf5ee93911be911ced951c44c", size = 36206, upload-time = "2023-12-03T04:16:17.55Z" }
-
-[[package]]
 name = "hydra-core"
 version = "1.3.0"
 source = { registry = "https://pypi.org/simple" }
@@ -6250,7 +6240,6 @@ name = "sheeprl"
 source = { editable = "." }
 dependencies = [
     { name = "gymnasium" },
-    { name = "hnswlib" },
     { name = "hydra-core" },
     { name = "lightning" },
     { name = "lightning-utilities" },
@@ -6270,6 +6259,7 @@ dependencies = [
     { name = "sortedcontainers" },
     { name = "tensorboard", version = "2.14.0", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.9'" },
     { name = "tensorboard", version = "2.20.0", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.9'" },
+    { name = "tiny-knn" },
     { name = "torch", version = "2.5.1", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.9'" },
     { name = "torch", version = "2.8.0", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version == '3.9.*'" },
     { name = "torch", version = "2.9.1", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.10'" },
@@ -6340,7 +6330,6 @@ requires-dist = [
     { name = "gymnasium", extras = ["box2d"], marker = "extra == 'box2d'", specifier = "==0.29.*" },
     { name = "gymnasium", extras = ["mujoco"], marker = "extra == 'mujoco'", specifier = "==0.29.*" },
     { name = "gymnasium", extras = ["other"], marker = "extra == 'atari'", specifier = "==0.29.*" },
-    { name = "hnswlib", specifier = ">=0.8.0" },
     { name = "hydra-core", specifier = "==1.3.0" },
     { name = "importlib-resources", marker = "extra == 'test'", specifier = ">=6.2.0" },
     { name = "isort", marker = "extra == 'dev'", specifier = "==5.13.2" },
@@ -6363,6 +6352,7 @@ requires-dist = [
     { name = "scikit-learn", specifier = ">=1.3.2" },
     { name = "sortedcontainers", specifier = ">=2.4.0" },
     { name = "tensorboard", specifier = ">=2.10" },
+    { name = "tiny-knn", specifier = ">=0.2.0" },
     { name = "torch", specifier = ">=2.0,!=2.2.0" },
     { name = "torchmetrics" },
     { name = "torchsummary" },
@@ -6646,6 +6636,22 @@ resolution-markers = [
 sdist = { url = "https://files.pythonhosted.org/packages/b7/4d/08c89e34946fce2aec4fbb45c9016efd5f4d7f24af8e5d93296e935631d8/threadpoolctl-3.6.0.tar.gz", hash = "sha256:8ab8b4aa3491d812b623328249fab5302a68d2d71745c8a4c719a2fcaba9f44e", size = 21274, upload-time = "2025-03-13T13:49:23.031Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/32/d5/f9a850d79b0851d1d4ef6456097579a9005b31fea68726a4ae5f2d82ddd9/threadpoolctl-3.6.0-py3-none-any.whl", hash = "sha256:43a0b8fd5a2928500110039e43a5eed8480b918967083ea48dc3ab9f13c4a7fb", size = 18638, upload-time = "2025-03-13T13:49:21.846Z" },
+]
+
+[[package]]
+name = "tiny-knn"
+version = "0.2.0"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "numpy", version = "1.24.4", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.9'" },
+    { name = "numpy", version = "1.26.4", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.9'" },
+    { name = "torch", version = "2.5.1", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.9'" },
+    { name = "torch", version = "2.8.0", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version == '3.9.*'" },
+    { name = "torch", version = "2.9.1", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.10'" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/9c/dd/332362c4db42ca18a5737db0dd5027d3f8e3a688845c53b9c9e6b730f1c5/tiny_knn-0.2.0.tar.gz", hash = "sha256:04d9c1bf105998d9daf0fb20093d4f9951671223974f05bbc6dddc6d8dca78cf", size = 46324, upload-time = "2025-08-25T05:49:14.815Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/a5/db/64133c474a55de5ce5b52ffbcbb4eae8443a65200e683fb883ca15c67224/tiny_knn-0.2.0-py3-none-any.whl", hash = "sha256:8f1cc8c2862d3fc1d08e203361e344257b18bf13f0331a5c10d5365319557ef3", size = 32556, upload-time = "2025-08-25T05:49:13.321Z" },
 ]
 
 [[package]]
