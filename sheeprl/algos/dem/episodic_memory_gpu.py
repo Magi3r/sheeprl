@@ -45,7 +45,7 @@ class GPUEpisodicMemory():
         """
         self.device: torch.device = fabric.device if fabric is not None else torch.device("cpu")
 
-        # self.solution()
+        self.solution()
         self.trajectory_length: int = trajectory_length
         self.uncertainty_threshold: float = uncertainty_threshold
         self.h_shape = h_shape      # h_shape: 4096
@@ -81,7 +81,6 @@ class GPUEpisodicMemory():
 
         self.kNN_rebuild_needed: bool = True            ## if NearestNeighbors object needs to be rebuild (due to change in keys)
         self.kNN_obj: NearestNeighbors | None = None    ## NearestNeighbors object (scikit-learn oder so)
-        self.key_vectors: np.array = np.empty([1])      ## array containing all keys as flatted
         self.key_array: list = []                       ## list containing all keys (this bytes shit)
 
         self.prev_state_stored = False    ## used in step function to keep track of newly started episode
@@ -194,7 +193,7 @@ class GPUEpisodicMemory():
         # clear state and current trajectory as next step will be totally independend from this
         if done:
             if self.current_trajectory is not None:
-                self.__fill_traj(torch.cat((z, torch.zeros((1, self.a_shape), device=self.device)), dim=1))
+                self.__fill_traj(z, torch.zeros_like(a, dtype=torch.float32, device=self.device))
             self.current_trajectory = None
             self.prev_state_stored = False
         else:
@@ -232,9 +231,9 @@ class GPUEpisodicMemory():
         if len(self) == 0: return (None, None, None)
 
         ## Ones for non-invalid probability tensors
-        initial_h = torch.ones((1, self.num_trajectories, self.h_shape), dtype=np.float32, device=self.device)
-        z_all = torch.ones((self.trajectory_length + 1, self.num_trajectories, self.z_shape), dtype=np.float32, device=self.device)
-        a_all = torch.ones((self.trajectory_length + 1, self.num_trajectories, self.a_shape), dtype=np.float32, device=self.device)
+        initial_h = torch.ones((1, self.num_trajectories, self.h_shape), dtype=torch.float32, device=self.device)
+        z_all = torch.ones((self.trajectory_length + 1, self.num_trajectories, self.z_shape), dtype=torch.float32, device=self.device)
+        a_all = torch.ones((self.trajectory_length + 1, self.num_trajectories, self.a_shape), dtype=torch.float32, device=self.device)
         
         full_trajes = 0
         for i in range(self.num_trajectories):
@@ -248,8 +247,8 @@ class GPUEpisodicMemory():
             if skip_non_full_traj and (trajectory.shape[0] != self.trajectory_length): continue
             full_trajes +=1
 
-            z_s = torch.Tensor(trajectory[:,:-self.a_shape], device=self.device)   # ! are logits # shape (length, 1024)
-            a_s = torch.Tensor(trajectory[:,-self.a_shape:], device=self.device)    # shape(length, 
+            z_s = torch.tensor(trajectory[:,:-self.a_shape], device=self.device)   # ! are logits # shape (length, 1024)
+            a_s = torch.tensor(trajectory[:,-self.a_shape:], device=self.device)    # shape(length, 
 
             #  (h, z, a)
             z_all[0, i] = self.trajectories_tensor[i, self.h_shape:-self.a_shape]
@@ -316,85 +315,6 @@ class GPUEpisodicMemory():
 
         self.num_trajectories -= to_prune_number
         
-        
-    # def kNN(cloud: torch.Tensor, center: torch.Tensor, k: int = 1): # cloud: 4 dims (batch, x, y, z); center: 3 dims (x,y,z)
-    #     center = center.expand(cloud.shape)
-        
-    #     # Computing euclidean distance
-    #     dist = cloud.add( - center).pow(2).sum(dim=3).pow(.5)
-        
-    #     # Getting the k nearest points
-    #     knn_indices = dist.topk(k, largest=False, sorted=False)[1]
-        
-    #     return cloud.gather(2, knn_indices.unsqueeze(-1).repeat(1,1,1,3))
-    def buildKNN(self):
-        """Building internal kNN object to prevent always rebuilding when multithreaded"""
-        warnings.warn("depricated!")
-        return 
-        if self.kNN_rebuild_needed:
-            self.kNN_rebuild_needed = False
-            
-            self.key_array = list(self.trajectories.keys())
-            self.key_vectors = np.stack([
-                np.concatenate([
-                    np.frombuffer(k[0], dtype=np.float32),
-                    np.frombuffer(k[1], dtype=np.float32),
-                    np.frombuffer(k[2], dtype=np.float32),
-                ])
-                for k in self.key_array
-            ])
-
-            assert(len(self.key_array) > 0), "No trajectories stored in EpisodicMemory."
-
-            search_space = np.concatenate([self._flatten_key(key_temp, from_bytes=True).reshape(1,-1) for key_temp in self.key_array])  # shape: (N, D)
-            # search_space = np.concatenate([key.reshape(1,-1) for key in key_array])  # shape: (N, D)
-
-            # x = key.reshape(1,-1)
-            self.kNN_obj = NearestNeighbors(
-                n_neighbors=self.k_nn,
-                metric="euclidean",   # or cosine, mahalanobis, etc.
-                n_jobs= -1            ## doing multithreading yes yes very very good
-            ).fit(search_space)
-
-
-    def kNN(self, keys: np.array, k: int = 1) -> tuple[list[tuple[np.array, np.array, np.array]], np.array]:
-        """Return the k-NearestNeighbors (keys + trajectories) among stored trajectory keys.
-            Args:
-                keys (np.array): [1, 1024, 5126] - no bytes here object (since only called for ACD calc, not on own EM keys).
-            Returns:
-                neighbors_keys (np.array[tuple]): actual values, not the bytes anymore.
-                trajectory_first_elems (np.array): corresponding trajectories first elems - shape: (1024, k, z_size + a_size)
-        """
-        warnings.warn("depricated!")
-        return ([(), []])
-    
-        # start = time.perf_counter_ns()
-        self.buildKNN()
-        # print(f"BUILD KNN duration: {(time.perf_counter_ns()- start)/1000_000}ms")
-
-        # start = time.perf_counter_ns()
-        distances, indices = self.kNN_obj.kneighbors(keys) ## indices: (1024, 5)    DURATION: ~37.432707ms for 5 trajectories
-        # print(f"PARALLEL KNN QUERYING duration: {(time.perf_counter_ns()- start)/1000_000}ms")
-
-        neighbors_keys = self.key_vectors[indices]  ## (1024, 5, 5126)
-        
-        ## for i in tqdm.tqdm(range(neighbors_keys.shape[0] * neighbors_keys.shape[1])):
-
-        trajectory_first_elems = np.empty((1024, 5, 1024+6))    ## (1024, 5, 1030) TODO: sizes hardcoded
-
-        # start = time.perf_counter_ns()
-        # Iterate over the indices and keys
-        for i in range(indices.shape[0]):
-            for j in range(indices.shape[1]):
-                key_index = int(indices[i, j])
-                key = self.key_array[key_index]
-                traj_obj, idx, _, _ = self.trajectories[key]
-                value = traj_obj.get_trajectory(idx)
-                trajectory_first_elems[i, j, :] = value[0]  # only take first (z, a) of shape (1030)
-        # print(f"FOR FOR LOOPI IN KNN duration: {(time.perf_counter_ns()- start)/1000_000}ms")
-
-        return (neighbors_keys, trajectory_first_elems)
-
     def kNN_gpu(self, query: torch.Tensor, k: int) -> torch.Tensor:
         """Return the k-NearestNeighbors (keys + trajectories) among stored trajectory keys.
             Args:
@@ -604,113 +524,3 @@ class Map():
 
     def __delitem__(self, index):
         self.delete(index)
-
-# class HybridKNN:
-#     def __init__(self, latent_tuples, w_discrete=1.0, w_cont=1.0, include_a=True):
-#         """
-#         latent_tuples: list of tuples (z, h, a)
-#             z: discrete latent [num_latent_dims, num_categories] (one-hot)
-#             h: continuous hidden state vector
-#             a: discrete action one-hot vector
-#         w_discrete: weight for discrete Hamming distance
-#         w_cont: weight for continuous Euclidean distance
-#         include_a: whether to include action in distance
-#         """
-#         self.w_discrete = w_discrete
-#         self.w_cont = w_cont
-#         self.include_a = include_a
-        
-#         # Stack discrete latents and actions
-#         self.Z = np.array([z.ravel() for z, _, a in latent_tuples])
-#         if include_a:
-#             self.A = np.array([a.ravel() for _, _, a in latent_tuples])
-#         else:
-#             self.A = None
-        
-#         # Stack continuous hidden states
-#         self.H = np.array([h for _, h, _ in latent_tuples])
-
-#     def query(self, query_tuple, k=5):
-#         zq, hq, aq = query_tuple
-#         zq_flat = zq.ravel()
-#         hq_flat = hq.ravel()
-#         if self.include_a and aq is not None:
-#             aq_flat = aq.ravel()
-#         else:
-#             aq_flat = None
-        
-#         # --- Hamming distance for discrete latents ---
-#         hz = np.mean(self.Z != zq_flat, axis=1)  # [num_samples]
-        
-#         if self.include_a and aq_flat is not None:
-#             ha = np.mean(self.A != aq_flat, axis=1)
-#             hamming_dist = hz + ha
-#         else:
-#             hamming_dist = hz
-        
-#         # --- Euclidean distance for continuous h ---
-#         cont_dist = np.linalg.norm(self.H - hq_flat, axis=1)
-        
-#         # --- Hybrid distance ---
-#         dist = self.w_discrete * hamming_dist + self.w_cont * cont_dist
-        
-#         # --- kNN ---
-#         idxs = np.argsort(dist)[:k]
-#         return idxs, dist[idxs]
-
-# import torch
-
-# class HybridKNNTorch:
-#     def __init__(self, latent_tuples, device='cuda', w_discrete=1.0, w_cont=1.0, include_a=True):
-#         """
-#         latent_tuples: list of tuples (z, h, a)
-#             z: [num_latent_dims, num_categories] one-hot
-#             h: continuous hidden state vector
-#             a: one-hot action
-#         device: 'cuda' or 'cpu'
-#         w_discrete: weight for discrete Hamming distance
-#         w_cont: weight for continuous Euclidean distance
-#         include_a: whether to include actions in distance
-#         """
-#         self.device = device
-#         self.w_discrete = w_discrete
-#         self.w_cont = w_cont
-#         self.include_a = include_a
-
-#         # Stack and move to device
-#         self.Z = torch.stack([torch.tensor(z, dtype=torch.float32) for z, _, _ in latent_tuples]).to(device)  # [N, z_dim, num_classes]
-#         if include_a:
-#             self.A = torch.stack([torch.tensor(a, dtype=torch.float32) for _, _, a in latent_tuples]).to(device)
-#         else:
-#             self.A = None
-#         self.H = torch.stack([torch.tensor(h, dtype=torch.float32) for _, h, _ in latent_tuples]).to(device)
-
-#         # Flatten discrete tensors for distance computation
-#         self.Z_flat = self.Z.flatten(start_dim=1)  # [N, z_dim*num_classes]
-#         if self.include_a and self.A is not None:
-#             self.A_flat = self.A.flatten(start_dim=1)  # [N, a_dim]
-
-#     def query(self, query_tuple, k=5):
-#         zq, hq, aq = query_tuple
-#         zq = torch.tensor(zq, dtype=torch.float32, device=self.device).flatten().unsqueeze(0)  # [1, z_dim*num_classes]
-#         hq = torch.tensor(hq, dtype=torch.float32, device=self.device).unsqueeze(0)  # [1, h_dim]
-#         if self.include_a and aq is not None:
-#             aq = torch.tensor(aq, dtype=torch.float32, device=self.device).flatten().unsqueeze(0)  # [1, a_dim]
-
-#         # --- Hamming distance for discrete parts ---
-#         hz = (self.Z_flat != zq).float().mean(dim=1)  # [N]
-#         if self.include_a and aq is not None:
-#             ha = (self.A_flat != aq).float().mean(dim=1)
-#             hamming_dist = hz + ha
-#         else:
-#             hamming_dist = hz
-
-#         # --- Euclidean distance for continuous h ---
-#         cont_dist = torch.norm(self.H - hq, dim=1)  # [N]
-
-#         # --- Hybrid distance ---
-#         dist = self.w_discrete * hamming_dist + self.w_cont * cont_dist
-
-#         # --- kNN ---
-#         distances, indices = torch.topk(dist, k=k, largest=False)
-#         return indices.cpu().numpy(), distances.cpu().numpy()

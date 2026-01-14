@@ -37,38 +37,39 @@ from sheeprl.models.models import (
 from sheeprl.utils.fabric import get_single_device_fabric
 from sheeprl.utils.model import ModuleType, cnn_forward
 from sheeprl.utils.utils import symlog
+import time
 
 # from torchsummary import summary
 
-class MCDropout(nn.Dropout):
-    """
-    Randomly randomly zeroes some of the elements of the input tensor with probability 'p'.
+# class MCDropout(nn.Dropout):
+#     """
+#     Randomly randomly zeroes some of the elements of the input tensor with probability 'p'.
 
-    This happens during training and inference when enabled
-    """
-    def __init__(self, p: float = 0.5, inplace: bool = False) -> None:
-        super().__init__(p, inplace)
-        self.enabled = True
+#     This happens during training and inference when enabled
+#     """
+#     def __init__(self, p: float = 0.5, inplace: bool = False) -> None:
+#         super().__init__(p, inplace)
+#         self.enabled = True
 
-    def disable(self) -> None:
-        """
-        Disables the dropout
-        """
-        self.enabled = False
+#     def disable(self) -> None:
+#         """
+#         Disables the dropout
+#         """
+#         self.enabled = False
 
-    def enable(self) -> None:
-        """
-        Enables the dropout
-        """
-        self.enabled = True
+#     def enable(self) -> None:
+#         """
+#         Enables the dropout
+#         """
+#         self.enabled = True
 
 
-    def forward(self, input: Tensor) -> Tensor:
-        """
-        Runs the forward pass.
-        With 'training' always set True when enabled, so also dropping out during inference.
-        """
-        return F.dropout(input, self.p, self.enable, self.inplace)
+#     def forward(self, input: Tensor) -> Tensor:
+#         """
+#         Runs the forward pass.
+#         With 'training' always set True when enabled, so also dropping out during inference.
+#         """
+#         return F.dropout(input, self.p, self.enable, self.inplace)
 
 class CNNEncoder(nn.Module):
     """The Dreamer-V3 image encoder. This is composed of 4 `nn.Conv2d` with
@@ -529,33 +530,27 @@ class RSSM(nn.Module):
             The imagined prior state (Tuple[Tensor, Tensor]): the imagined prior state.
             The recurrent state (Tensor).
         """
+        # start_time = time.perf_counter_ns()
         recurrent_state = self.recurrent_model(torch.cat((prior, actions), -1), recurrent_state)
         imagined_prior_logits, imagined_prior = self._transition(recurrent_state)
-
+        # print(f"Imagination step time (ns): {(time.perf_counter_ns()- start_time)/1000_000}ms")
         # print("recurrent_state shape: ", recurrent_state.shape)           
         # print("imagined_prior_logits shape: ", imagined_prior_logits.shape)  
         ### TODO: needs testing, but should return the uncertainties, for one batch
         ## ! in Behaviour Learning we might call this on 1024 states, so we also need to calc. 1024 uncertainties?
+        # torch.cuda.synchronize()
+        # t0 = time.perf_counter()
         if return_uncertainty:   
             with torch.no_grad():
                 self.transition_model.enable_mc_dropout()
-                
-                n = self.transition_model.mc_dropout_repeat
-                # batch_recurrent_state = torch.stack([recurrent_state] * n, dim=0)
-                batch_recurrent_state = recurrent_state.repeat(n, 1, 1)
-                ## run n-times
-                prior_logits_batch, prior_batch = self._transition(batch_recurrent_state)
-                # print("batch_recurrent_state shape: ", batch_recurrent_state.shape)      
-                # print("prior_logits_batch shape: ", prior_logits_batch.shape)  
-                mean = torch.mean(prior_logits_batch, dim=0)
-                std = torch.std(prior_logits_batch, dim=0)
 
-                ## calc. uncertainty
-                uncertainty = torch.mean(std, dim = -1).float()#   # range: ~0.07 - 0.04
-                uncertainty = uncertainty / 0.1
-
+                prior_logits_flat, _ = self._transition(recurrent_state)
+                # print("prior_logits_flat shape:", prior_logits_flat.shape)   # Shape: torch.Size([1, 5])
+                std = prior_logits_flat.std(dim=0)         # (B, T, D)
+                uncertainty = std.mean(dim=-1)           # (B, T)
+                # print("uncertainty shape:", uncertainty.shape)   # Shape: torch.Size([1, 5])
                 self.transition_model.disable_mc_dropout()
-
+            # print(f"Uncertainty calculation time (ns): {(time.perf_counter_ns()- start_time)/1000_000}ms")
             return (imagined_prior_logits if return_logits else imagined_prior), recurrent_state, uncertainty
 
         return (imagined_prior_logits if return_logits else imagined_prior), recurrent_state
@@ -753,19 +748,13 @@ class PlayerDV3(nn.Module):
             with torch.no_grad():
                 self.rssm.transition_model.enable_mc_dropout()
                 
-                n = self.rssm.transition_model.mc_dropout_repeat
-                batch_recurrent_state = torch.stack([self.recurrent_state] * n, dim=0)
-                ## run n-times
-                prior_logits_batch, prior_batch = self.rssm._transition(batch_recurrent_state)
-                mean = torch.mean(prior_logits_batch, dim=0)
-                std = torch.std(prior_logits_batch, dim=0)
-
-                ## calc. uncertainty
-                uncertainty = torch.mean(std).float().item()   # range: ~0.07 - 0.04
-                uncertainty = uncertainty / 0.1
-
-                # print(f"Shape Mean: {mean.shape}\n Shape Std: {std.shape}\n Logits Shape:{prior_logits_batch.shape}")
-                # print("Uncertainty", uncertainty)
+                prior_logits_flat, _ = self.rssm._transition(self.recurrent_state)
+                # print("prior_logits_flat shape:", prior_logits_flat.shape)   # Shape: torch.Size([5, 1, 4096])
+                std = prior_logits_flat.std(dim=0)         # (B, T, D)
+                uncertainty = std.mean(dim=-1)           # (B, T)
+                # print("uncertainty shape:", uncertainty.shape)   # Shape: torch.Size([1, 5])
+                # print("self.recurrent_state:", self.recurrent_state.shape)
+                # print(prior_logits_flat.shape)
                 
                 # print(f"Mean: {mean}\nStd: {std}")
                     # Shape Mean: torch.Size([1, 4096])

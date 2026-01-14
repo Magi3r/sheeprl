@@ -22,6 +22,7 @@ from torch import Tensor
 from torch.distributions import Distribution, Independent, OneHotCategorical
 from torch.optim import Optimizer
 from torchmetrics import SumMetric
+from tqdm import tqdm
 
 from sheeprl.algos.dreamer_v2.utils import compute_stochastic_state
 
@@ -230,7 +231,7 @@ def train(
         )
     world_optimizer.step()
 
-    print("Behaviour Learning ~Actor-Critic stuff")
+    # print("Behaviour Learning ~Actor-Critic stuff")
     # Behaviour Learning    ## (Actor-Critic) ~ this shoulnd be important for rehearsal training
     imagined_prior = posteriors.detach().reshape(1, -1, stoch_state_size)               ## ? wird später in imagination überschrieben ~Josch
     recurrent_state = recurrent_states.detach().reshape(1, -1, recurrent_state_size)
@@ -266,8 +267,7 @@ def train(
     # where z0 comes from the posterior, while z'i is the imagined states (prior)
 
     # Imagine trajectories in the latent space
-    start_time_loop = time.perf_counter_ns()    ## ~115.785073 ms vs. 533 ms with all our stuff
-        # Imagine trajectories in the latent space
+    # start_time_loop = time.perf_counter_ns()
     # for i in range(1, cfg.algo.horizon + 1):
     #     imagined_prior, recurrent_state = world_model.rssm.imagination(imagined_prior, recurrent_state, actions)
     #     imagined_prior = imagined_prior.view(1, -1, stoch_state_size)
@@ -275,58 +275,67 @@ def train(
     #     imagined_trajectories[i] = imagined_latent_state
     #     actions = torch.cat(actor(imagined_latent_state.detach())[0], dim=-1)
     #     imagined_actions[i] = actions
-    for i in range(1, cfg.algo.horizon + 1):
+    # print("Their Total imagination loop duration          :", (time.perf_counter_ns()- start_time_loop)/1000_000, "ms") ### ~ 50ms
+    # torch.cuda.synchronize()
+    start_time_loop = time.perf_counter_ns()
+    for i in range(1, cfg.algo.horizon + 1):    ## lopin 15 times
         return_uncertainty = True
         # if return_uncertainty: uncertainties = np.random.rand(1024)
 
-        start = time.perf_counter_ns()
+        # start = time.perf_counter_ns()
         imagined_prior, recurrent_state, uncertainties = world_model.rssm.imagination(imagined_prior, recurrent_state, actions, return_uncertainty = return_uncertainty)
-        print(f"their imag duration                 :{(time.perf_counter_ns()- start)/1000_000}ms")
+        # print(f"their imag duration:{(time.perf_counter_ns()- start)/1000_000}ms")
         # imagined_prior, recurrent_state = world_model.rssm.imagination(imagined_prior, recurrent_state, actions, return_uncertainty = return_uncertainty)
         
         # # print(uncertainties.shape)
         # # print(torch.std(uncertainties).cpu().numpy())
 
-        start = time.perf_counter_ns()
+        # start = time.perf_counter_ns()
         ### update treshold based on rolling mean and std ~0.145592ms
         read_dream_mean_std[0] = torch.mean(uncertainties) * cfg.episodic_memory.read_exp_mov_avg_alpha + read_dream_mean_std[0] * (1 - cfg.episodic_memory.read_exp_mov_avg_alpha)           
         read_dream_mean_std[1] = torch.std(uncertainties) * cfg.episodic_memory.read_exp_mov_avg_alpha + read_dream_mean_std[1] * (1 - cfg.episodic_memory.read_exp_mov_avg_alpha)
         lookup_treshold = read_dream_mean_std[0] + read_z * read_dream_mean_std[1]
-        print(f"uncertainty threshold calculation   :{(time.perf_counter_ns()- start)/1000_000}ms")
+        # print(f"uncertainty threshold calculation   :{(time.perf_counter_ns()- start)/1000_000}ms")
 
         # print(" updated read_dream_mean_std:", read_dream_mean_std, " lookup_treshold:", lookup_treshold)
-        start = time.perf_counter_ns()
-        imagined_prior = imagined_prior.view(1, -1, stoch_state_size)   ## should be sahep of: (1, :) , 32)
-        imagined_latent_state = torch.cat((imagined_prior, recurrent_state), -1)
-        imagined_trajectories[i] = imagined_latent_state
-        actions = torch.cat(actor(imagined_latent_state.detach())[0], dim=-1)
-        imagined_actions[i] = actions
-        print(f"rest of imagination loop duration   :{(time.perf_counter_ns()- start)/1000_000}ms")
+        # start = time.perf_counter_ns()
+
+        # print(f"rest of imagination loop duration   :{(time.perf_counter_ns()- start)/1000_000}ms")
         # Create a boolean mask based on the uncertainty array
-        start = time.perf_counter_ns()
+        # start = time.perf_counter_ns()
+            
+        imagined_prior = imagined_prior.view(1, -1, stoch_state_size)   ## after: -> [1, 1024, 1024]
+        # torch.cuda.synchronize()
+        # start = time.perf_counter_ns()
+
         if return_uncertainty:
             k: int = cfg.episodic_memory.k_neighbors
 
-            ## TODO: currently still calc. ACD for ALL, not checking where uncertainty even high enough
-            ## if uncertainties[i] > cfg.episodic_memory.read_threshold_last_N
+            uncertainty_mask = uncertainties > lookup_treshold          ## shape [1024]
 
-            # print(f"calc ACD: {recurrent_state.shape[1]} times")
-
-            ## making this for loop parallel:
-            # start = time.perf_counter_ns()
-            ## ACDs: [1024, 5, 1024]
-            ACDs: np.array = parallel_additive_correction_delta(recurrent_state, 
-                                                                imagined_prior, 
-                                                                actions, 
+            ## ACDs: [num_uncertainties>_threashold, 1, 1024]
+            ACDs: torch.tensor = parallel_additive_correction_delta(recurrent_state[:, uncertainty_mask, :], 
+                                                                imagined_prior[:, uncertainty_mask, :], 
+                                                                actions[:, uncertainty_mask, :], 
                                                                 episodic_memory, 
                                                                 world_model, 
                                                                 k, 
                                                                 device=device)
-        print(f"calc parallel ACDs duration: {(time.perf_counter_ns()- start)/1000_000}ms for EM of size: {len(episodic_memory)}")
-            # print(f"parallel additive_correction_delta duration: {(time.perf_counter_ns()- start)/1000_000}ms for EM of size: {len(episodic_memory)}")
 
+            imagined_prior[:, uncertainty_mask, :] += ACDs
+        imagined_latent_state = torch.cat((imagined_prior, recurrent_state), -1)
+        imagined_trajectories[i] = imagined_latent_state
+        actions = torch.cat(actor(imagined_latent_state.detach())[0], dim=-1)
+        imagined_actions[i] = actions
+        # torch.cuda.synchronize()
+        # print(f"calc parallel ACDs duration: {(time.perf_counter_ns()- start)/1000_000}ms for EM of size: {len(episodic_memory)}")
+
+    # torch.cuda.synchronize()
+    # print("Total imagination loop duration          :", (time.perf_counter_ns()- start_time_loop)/1000_000, "ms")### 
+        
+        # print(f"calc parallel ACDs duration: {(time.perf_counter_ns()- start)/1000_000}ms for EM of size: {len(episodic_memory)}")
+            # print(f"parallel additive_correction_delta duration: {(time.perf_counter_ns()- start)/1000_000}ms for EM of size: {len(episodic_memory)}")
         # print(f"dream lookup threshold is: {lookup_treshold}")
-    print("Total imagination loop duration          :", (time.perf_counter_ns()- start_time_loop)/1000_000, "ms")
     # Predict values, rewards and continues
     predicted_values = TwoHotEncodingDistribution(critic(imagined_trajectories), dims=1).mean
     predicted_rewards = TwoHotEncodingDistribution(world_model.reward_model(imagined_trajectories), dims=1).mean
@@ -470,9 +479,9 @@ def rehearsal_train(fabric:             Fabric,
     stochastic_size = cfg.algo.world_model.stochastic_size
     discrete_size = cfg.algo.world_model.discrete_size
     device = fabric.device
-    start_time = time.time()
+    # start_time = time.time()
     all_recurrents_states, all_posteriors_logits, all_actions = episodic_memory.get_samples()
-    end_time = time.time()
+    # end_time = time.time()
     # if False:
         # episodic_memory._prune_memory(10)
     # print(f"Get_Samples: {(end_time - start_time)/1000} seconds")
@@ -493,9 +502,9 @@ def rehearsal_train(fabric:             Fabric,
         j = min(batch_size, max(all_recurrents_states.shape[1]-i, 0)) ### (only relevant for last batch (i mean the calculation))
         if j==0: continue
 
-        recurrent_state = torch.from_numpy(all_recurrents_states[:, i:i+j]).to(device)
-        posteriors_logits = torch.from_numpy(all_posteriors_logits[:, i:i+j]).to(device)
-        actions = torch.from_numpy(all_actions[:, i:i+j]).to(device)
+        recurrent_state = all_recurrents_states[:, i:i+j]
+        posteriors_logits = all_posteriors_logits[:, i:i+j]
+        actions = all_actions[:, i:i+j]
 
         posteriors = compute_stochastic_state(posteriors_logits) ## torch.empty(traj_length, batch_size, stochastic_size, discrete_size, device=device)
         posteriors = posteriors.view(*posteriors.shape[:-2], -1)
@@ -782,16 +791,17 @@ def main(fabric: Fabric, cfg: Dict[str, Any]):
     last_n_uncertainty_mean = 0.0
     last_n_uncertainty_std  = 0.0
 
-    for iter_num in range(start_iter, total_iters + 1):
+    for iter_num in tqdm(range(start_iter, total_iters + 1)):
         policy_step += policy_steps_per_iter
+        # print(f"=== Iteration {iter_num} / {total_iters}, Policy Step: {policy_step} ===")
 
         ### adjust EM read and write std mulittipliers
         if write_z < cfg.episodic_memory.write_std_multiplier_max and \
           policy_step >= cfg.episodic_memory.write_std_inc_start_at_ep:
-            write_z = min(cfg.episodic_memory.write_std_multiplier_max, write_z * cfg.episodic_memory.write_std_inc_factor)
+            write_z = min(cfg.episodic_memory.write_std_multiplier_max, write_z + cfg.episodic_memory.write_std_inc_addend)
         if read_z < cfg.episodic_memory.read_std_multiplier_max and \
           policy_step >= cfg.episodic_memory.read_std_inc_start_at_ep:
-            read_z = min(cfg.episodic_memory.read_std_multiplier_max, read_z * cfg.episodic_memory.read_std_inc_factor)
+            read_z = min(cfg.episodic_memory.read_std_multiplier_max, read_z + cfg.episodic_memory.read_std_inc_addend)
 
     ### handle environment interaction and replay_buffer filling
     ###-----------------------------------
@@ -842,11 +852,12 @@ def main(fabric: Fabric, cfg: Dict[str, Any]):
                     last_N_env_uncertainties[iter_num % last_N_env_uncertainties.shape[0]] = uncertainty    ## here add single value
                     last_n_uncertainty_mean = np.mean(last_N_env_uncertainties)
                     last_n_uncertainty_std = np.std(last_N_env_uncertainties)
-                    # print(f"uncertainty mean: {last_n_uncertainty_mean} std: {last_n_uncertainty_std}")
                     em_read_threshold = last_n_uncertainty_mean + write_z * last_n_uncertainty_std
                     episodic_memory.set_threshold(em_read_threshold)
-                    print(f"Env Uncertaitny: {uncertainty}")
-                    print(f"EM read threshold set to: {em_read_threshold}")
+                    # print(f"uncertainty mean: {last_n_uncertainty_mean} std: {last_n_uncertainty_std}")
+                    # print(f"EM read threshold set to: {em_read_threshold}")
+                    # print(f"Env Uncertaitny: {uncertainty}")
+                    # print(f"EM length: {len(episodic_memory)}")
                 
                 # em_insert_threshold = np.percentile(last_N_env_uncertainties, cfg.episodic_memory.percentile_treshold)
                 # episodic_memory.set_threshold(em_insert_threshold)
@@ -887,8 +898,8 @@ def main(fabric: Fabric, cfg: Dict[str, Any]):
                     # print(episodic_memory)
                 ## Update Episodic Memory
                 # uncertainty = np.array([0.8])
-                if iter_num > learning_starts:
-                    print(f"shapes: {h} {z_logits}")
+                # if iter_num > learning_starts:
+                #     print(f"shapes: {h} {z_logits}")
                 if cfg.episodic_memory.enable_rehersal_training:
                     episodic_memory.step(
                         h=h,
@@ -1054,9 +1065,9 @@ def main(fabric: Fabric, cfg: Dict[str, Any]):
             fabric.log("EM/write_z", write_z, policy_step)
             fabric.log("EM/read_z", read_z, policy_step)
             fabric.log("EM/Env_Uncertainty", last_n_uncertainty_mean, policy_step)
-            fabric.log("EM/Dream_Uncertainty", read_dream_mean_std[0].cpu().numpy(), policy_step)
+            fabric.log("EM/Dream_Uncertainty", read_dream_mean_std[0].cpu().numpy(), policy_step) # dont know if correct
             fabric.log("EM/Write_Treshold", (last_n_uncertainty_mean + write_z * last_n_uncertainty_std), policy_step)
-            fabric.log("EM/Read_Treshold", (read_dream_mean_std[0].cpu().numpy() + read_z * read_dream_mean_std[1].cpu().numpy()), policy_step)
+            fabric.log("EM/Read_Treshold", (read_dream_mean_std[0].cpu().numpy() + read_z * read_dream_mean_std[1].cpu().numpy()), policy_step) # dont know if correct
 
             # Sync distributed timers
             if not timer.disabled:

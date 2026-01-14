@@ -297,16 +297,14 @@ def parallel_additive_correction_delta(recurrent_states: torch.tensor, prior_log
 
     if len(episodic_memory) < k:
         # print("warning: EM is empty")
-        return torch.zeros((k, z_size)).to(device=device)
+        return torch.zeros((their_seq, z_size)).to(device=device)
 
     keys = torch.cat([recurrent_states, prior_logits, actions], dim=-1)[0]  ### shape: [1, 1024, 5126]
     indices = episodic_memory.kNN_gpu(keys, k).flatten() ## indices shape: (1024 * k)
-    # print(f"KNN part duration: {(time.perf_counter_ns()- start)/1000_000}ms")
+    # print(f"KNN part duration                       : {(time.perf_counter_ns()- start)/1000_000}ms")
 
     # start = time.perf_counter_ns()
     nn_keys = episodic_memory.trajectories_tensor[indices]
-
-    idxs = episodic_memory.idx[indices]
 
     # nn_trajectories = torch.stack(nn_trajectories, dim=1).to(device)
     next_prior_logits = episodic_memory.next_z[indices]  ## shape: [1024 * k, 1024 + 6]
@@ -319,21 +317,23 @@ def parallel_additive_correction_delta(recurrent_states: torch.tensor, prior_log
 
     knn_priors = compute_stochastic_state(knn_prior_logits)    ## [1, 1024*5, 1024]
     knn_priors = knn_priors.view(*(knn_priors.shape[:-2]), -1)              ## view: [1, 1024 * 5, 32, 32] -> [1, 1024 * 5, 1024]
-
     # print(f"PREPARE part duration: {(time.perf_counter_ns()- start)/1000_000}ms")
     ## what works with imagination:
     ## priors           torch.Size([1, 1024, 1024])
     ## recurrent_states torch.Size([1, 1024, 4096])
     ## actions          torch.Size([1, 1024, 6])
     # start = time.perf_counter_ns()
-    next_imagined_prior_logits, _ = world_model.rssm.imagination(knn_priors, knn_recurrent_states, knn_actions, return_logits=True) ## ~0.92809ms
-    # print(f"our IMAGINATION part duration: {(time.perf_counter_ns()- start)/1000_000}ms")
+    with torch.no_grad():
+        next_imagined_prior_logits, _ = world_model.rssm.imagination(knn_priors, knn_recurrent_states, knn_actions, return_logits=True) ## ~0.92809ms
+    # torch.cuda.synchronize()
+    # print(f"our IMAGINATION part duration           : {(time.perf_counter_ns()- start)/1000_000}ms")
     # next_imagined_prior_logits = next_imagined_prior_logits.view(their_seq, k, z_size)   ## [1024, 5, 1024]
 
     ## calculate additive correction delta
     acd = next_prior_logits - next_imagined_prior_logits
     acd = acd.view(their_seq, k, z_size)
-
-    # print(f"MODEL INFERENCE + LAST ACD part duration: {(time.perf_counter_ns()- start)/1000_000}ms")
+    acd = torch.mean(acd, dim=1)
+    
+    # print(f"MODEL INFERENCE + LAST ACD part duration: {(time.perf_counter_ns() - start)/1000_000}ms")
 
     return acd

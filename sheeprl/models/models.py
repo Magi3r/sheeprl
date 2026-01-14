@@ -19,9 +19,10 @@ class MCDropout(nn.Dropout):
 
     This happens during training and inference when enabled
     """
-    def __init__(self, p: float = 0.5, inplace: bool = False) -> None:
+    def __init__(self, p: float = 0.5, num_mc_repeat: int = 5, inplace: bool = False) -> None:
         super().__init__(p, inplace)
-        self.enabled = True
+        self.num_mc_repeat = num_mc_repeat
+        self.enabled = False
 
     def disable(self) -> None:
         """
@@ -35,15 +36,44 @@ class MCDropout(nn.Dropout):
         """
         self.enabled = True
 
-
     def forward(self, input: Tensor) -> Tensor:
         """
         Runs the forward pass.
         With 'training' always set True when enabled, so also dropping out during inference.
         """
-        return F.dropout(input, self.p, self.enabled, self.inplace)
+        # return F.dropout(input, self.p, self.enabled, self.inplace)
+        if not self.enabled or self.p == 0.0:
+            return input
 
+        # x: (B, D)
+        # create (MC, B, D) dropout masks
+        ### custom dropout for MC for efficiency
+        input = input.expand(self.num_mc_repeat, *(input.shape[1:]))
+        mask = torch.rand_like(input, device=input.device) > self.p
 
+        return input * mask / (1 - self.p) ## (1,x, 4096) * (5, x, 4096) -> (5, x, 4096)
+    
+    # def forward(self, input: Tensor) -> Tensor:
+    #     """
+    #     Runs the forward pass.
+    #     With 'training' always set True when enabled, so also dropping out during inference.
+    #     """
+    #     # return F.dropout(input, self.p, self.enabled, self.inplace)
+    #     if not self.enabled or self.p == 0.0:
+    #         return input
+
+    #     # x: (B, D)
+    #     # create (MC, B, D) dropout masks
+    #     ### custom dropout for MC for efficiency
+    #     input = input.expand(self.num_mc_repeat + 1, *(input.shape[1:]))
+    #     mask = torch.rand_like(input, device=input.device) > self.p
+    #     ### make sure the first one is always kept
+    #     mask[0].fill_(1.0)
+    #     input = input * mask
+    #     input[1:] /= (1.0 - self.p)
+    #     return input
+
+            
 class MLP(nn.Module):
     """Simple MLP backbone.
 
@@ -128,10 +158,9 @@ class MLP(nn.Module):
         ):
             model += miniblock(in_dim, out_dim, nn.Linear, l_args, drop, drop_args, norm, norm_args, activ, act_args)
 
-        ## TODO: add dropout layer after output layer? here?
         if mc_dropout:
             self._mc_dropout_prob = mc_dropout_prob
-            model += [MCDropout(mc_dropout_prob)]
+            model += [MCDropout(mc_dropout_prob, mc_dropout_repeat)]
             self.mc_dropout_repeat = mc_dropout_repeat
 
         if output_dim is not None:
