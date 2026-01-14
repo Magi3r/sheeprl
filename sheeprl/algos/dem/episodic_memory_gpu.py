@@ -67,6 +67,7 @@ class GPUEpisodicMemory():
         self.idx: torch.Tensor         = torch.empty(self.max_elements, dtype=torch.int64, device = self.device)
         self.uncertainty: torch.Tensor = torch.empty(self.max_elements, dtype=torch.float32, device = self.device)
         self.birth_time: torch.Tensor  = torch.empty(self.max_elements, dtype=torch.int64, device = self.device)
+        self.next_z : torch.Tensor     = torch.empty((self.max_elements, self.z_shape), dtype=torch.float32, device = self.device)
         
         self.current_trajectory: TrajectoryObject | None = None
         self.num_trajectories: int = 0  ## number of trajectories currently stored (and so also idx of last empty elem)
@@ -83,7 +84,7 @@ class GPUEpisodicMemory():
         self.key_vectors: np.array = np.empty([1])      ## array containing all keys as flatted
         self.key_array: list = []                       ## list containing all keys (this bytes shit)
 
-        self.is_prev_stoch_state_none = True    ## used in step function to keep track of newly started episode
+        self.prev_state_stored = False    ## used in step function to keep track of newly started episode
 
         warnings.warn("EpisodicMemory currently only works with a single environment instance!")
 
@@ -160,14 +161,14 @@ class GPUEpisodicMemory():
         """
         # initial step, just store. Even if uncertain dont have a key for it 
         # or if deter is None while filling replay_buffer
-        if self.is_prev_stoch_state_none:
+        if not self.prev_state_stored:
             if (z is None):
-                self.is_prev_stoch_state_non = True
                 return
             self.prev_state[:self.h_shape] = h
             self.prev_state[self.h_shape:self.h_shape+self.z_shape] = z
-            self.is_prev_stoch_state_none = False
+            self.prev_state_stored = True
             return
+        
         # add new trajecory
         if uncertainty >= self.uncertainty_threshold:
             assert(self.prev_state is not None)
@@ -178,10 +179,12 @@ class GPUEpisodicMemory():
                 self.__fill_traj(self.prev_state[-self.z_shape:], a)
             if len(self) >= self.max_elements:
                 self._prune_memory(prune_fraction=self.prune_fraction)
-            self.__create_traj(h, z, a, uncertainty)
+            self.__create_traj(self.prev_state[:self.h_shape], self.prev_state[-self.z_shape:], a, uncertainty)
+            ### store next z in seperate tensor for fast access during training (ACD)
+            self.next_z[self.num_trajectories] = self.prev_state[-self.z_shape:]
         # just fill trajectory space
         elif self.current_trajectory is not None and self.current_trajectory.free_space != 0:
-            assert(not self.is_prev_stoch_state_non)
+            assert(self.prev_state_stored)
             self.__fill_traj(self.prev_state[-self.z_shape:], a)
         # no space: no trajectory
         else:
@@ -193,12 +196,12 @@ class GPUEpisodicMemory():
             if self.current_trajectory is not None:
                 self.__fill_traj(torch.cat((z, torch.zeros((1, self.a_shape), device=self.device)), dim=1))
             self.current_trajectory = None
-            self.is_prev_stoch_state_non = True
+            self.prev_state_stored = False
         else:
             self.prev_state[:self.h_shape] = h
             self.prev_state[self.h_shape:self.h_shape+self.z_shape] = z
             self.prev_state[-self.a_shape:] = a
-            self.is_prev_stoch_state_non = False
+            self.prev_state_stored = True
 
         self.step_counter += 1
 

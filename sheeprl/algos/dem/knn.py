@@ -103,9 +103,10 @@ def exact_search(
     Backwards-compat: `normalize=True` forces cosine behavior.
     Inputs and outputs are torch-saved (.pt).
     """
-    start_time = time.time()
+    # start_time = time.time()
 
     if isinstance(arr1, str) and isinstance(arr2, str):
+        raise ValueError("NO SUPPORTED")
         arr1 = load_array(arr1)
         arr2 = load_array(arr2)
     
@@ -116,6 +117,7 @@ def exact_search(
         raise ValueError("arr2 must be a numpy.ndarray, torch.Tensor, or filepath string")
 
     if isinstance(arr1, np.ndarray):
+        raise ValueError("Numpy input not supported in this version. Please provide torch.Tensor inputs.")
         assert isinstance(arr2, np.ndarray)
         use_numpy = True
         q_np: np.ndarray = arr1
@@ -201,11 +203,11 @@ def exact_search(
     empty_cache_mode = os.environ.get("TINYKNN_EMPTY_CACHE", "batch")
 
     # Outputs on CPU
-    topk_scores = torch.empty((Q, k), dtype=torch.float32)
-    topk_indices = torch.empty((Q, k), dtype=torch.int64)
+    topk_scores = torch.empty((Q, k), dtype=torch.float32, device=input_device)
+    topk_indices = torch.empty((Q, k), dtype=torch.int64, device=input_device)
 
-    print(
-        f"Device={torch_device.type}, metric={metric}, Q={Q}x{dim}, D={D}x{dim}, batch_size={batch_size}, doc_rows={doc_rows}, k={k}, dtype={tdtype}")
+    # print(
+        # f"Device={torch_device.type}, metric={metric}, Q={Q}x{dim}, D={D}x{dim}, batch_size={batch_size}, doc_rows={doc_rows}, k={k}, dtype={tdtype}")
 
     with torch.inference_mode():
         stream = torch.cuda.Stream() if torch_device.type == "cuda" and not on_gpu_input else None
@@ -328,11 +330,10 @@ def exact_search(
                 torch.cuda.empty_cache()
 
             pct = 100.0 * min(qe, Q) / max(Q, 1)
-            print(f"Processed queries {qs}:{qe} ({pct:.1f}%)")
+            # print(f"Processed queries {qs}:{qe} ({pct:.1f}%)")
 
-    elapsed = time.time() - start_time
-    print(f"Done in {elapsed:.2f}s")
-
+    # elapsed = time.time() - start_time
+    # print(f"Done in {elapsed:.2f}s")
     if use_numpy:
         return topk_indices.numpy(), topk_scores.numpy()
     return topk_indices, topk_scores

@@ -514,7 +514,7 @@ class RSSM(nn.Module):
         logits = self._uniform_mix(logits)
         return logits, compute_stochastic_state(logits, discrete=self.discrete, sample=sample_state)
     
-    def imagination(self, prior: Tensor, recurrent_state: Tensor, actions: Tensor, return_logits: bool = False, return_uncertainty: bool = False) -> Tuple[Tensor, Tensor]:
+    def imagination(self, prior: Tensor, recurrent_state: Tensor, actions: Tensor, return_logits: bool = False, return_uncertainty: bool = False) -> Tuple:
         """
         One-step imagination of the next latent state.
         It can be used several times to imagine trajectories in the latent space (Transition Model).
@@ -553,8 +553,6 @@ class RSSM(nn.Module):
                 ## calc. uncertainty
                 uncertainty = torch.mean(std, dim = -1).float()#   # range: ~0.07 - 0.04
                 uncertainty = uncertainty / 0.1
-
-
 
                 self.transition_model.disable_mc_dropout()
 
