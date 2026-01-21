@@ -39,38 +39,6 @@ from sheeprl.utils.model import ModuleType, cnn_forward
 from sheeprl.utils.utils import symlog
 import time
 
-# from torchsummary import summary
-
-# class MCDropout(nn.Dropout):
-#     """
-#     Randomly randomly zeroes some of the elements of the input tensor with probability 'p'.
-
-#     This happens during training and inference when enabled
-#     """
-#     def __init__(self, p: float = 0.5, inplace: bool = False) -> None:
-#         super().__init__(p, inplace)
-#         self.enabled = True
-
-#     def disable(self) -> None:
-#         """
-#         Disables the dropout
-#         """
-#         self.enabled = False
-
-#     def enable(self) -> None:
-#         """
-#         Enables the dropout
-#         """
-#         self.enabled = True
-
-
-#     def forward(self, input: Tensor) -> Tensor:
-#         """
-#         Runs the forward pass.
-#         With 'training' always set True when enabled, so also dropping out during inference.
-#         """
-#         return F.dropout(input, self.p, self.enable, self.inplace)
-
 class CNNEncoder(nn.Module):
     """The Dreamer-V3 image encoder. This is composed of 4 `nn.Conv2d` with
     kernel_size=3, stride=2 and padding=1. No bias is used if a `nn.LayerNorm`
@@ -530,17 +498,46 @@ class RSSM(nn.Module):
             The imagined prior state (Tuple[Tensor, Tensor]): the imagined prior state.
             The recurrent state (Tensor).
         """
+
+                # print(f"Imagination step time (ns): {(time.perf_counter_ns()- start_time)/1000_000}ms")
+                # print("recurrent_state shape: ", recurrent_state.shape)           
+                # print("imagined_prior_logits shape: ", imagined_prior_logits.shape)  
+                ### TODO: needs testing, but should return the uncertainties, for one batch
+                ## ! in Behaviour Learning we might call this on 1024 states, so we also need to calc. 1024 uncertainties?
+                # torch.cuda.synchronize()
+                # t0 = time.perf_counter()
+
         # start_time = time.perf_counter_ns()
+        # if return_uncertainty:
+        #     with torch.no_grad():
+        #         self.transition_model.enable_mc_dropout()
+        #         recurrent_state = self.recurrent_model(torch.cat((prior, actions), -1), recurrent_state)
+        #         imagined_prior_logits, imagined_prior = self._transition(recurrent_state)
+
+        #         # prior_logits_flat, _ = self._transition(recurrent_state)
+        #         std = imagined_prior_logits[1:].std(dim=0)  # (B, T, D)
+        #         uncertainty = std.mean(dim=-1)              # (B, T)
+        #         # print("uncertainty shape:", uncertainty.shape)
+
+        #         self.transition_model.disable_mc_dropout()
+        #         # print(f"Uncertainty imagination time (ns):  {(time.perf_counter_ns()- start_time)/1000_000}ms") 
+        #         ## [1, 1024, 1024] | [1, 1024, 32, 32]; [1, 1024, 4096]; [1024]
+        #     return (imagined_prior_logits[0:1] if return_logits else imagined_prior[0:1]), recurrent_state[0:1], uncertainty    
+        # else:
+        #     recurrent_state = self.recurrent_model(torch.cat((prior, actions), -1), recurrent_state)
+        #     imagined_prior_logits, imagined_prior = self._transition(recurrent_state)
+        #     # print(f"No uncertain imagination time (ns):     {(time.perf_counter_ns()- start_time)/1000_000}ms")
+        #     return (imagined_prior_logits if return_logits else imagined_prior), recurrent_state
+            # start_time = time.perf_counter_ns()
         recurrent_state = self.recurrent_model(torch.cat((prior, actions), -1), recurrent_state)
         imagined_prior_logits, imagined_prior = self._transition(recurrent_state)
         # print(f"Imagination step time (ns): {(time.perf_counter_ns()- start_time)/1000_000}ms")
         # print("recurrent_state shape: ", recurrent_state.shape)           
         # print("imagined_prior_logits shape: ", imagined_prior_logits.shape)  
-        ### TODO: needs testing, but should return the uncertainties, for one batch
         ## ! in Behaviour Learning we might call this on 1024 states, so we also need to calc. 1024 uncertainties?
         # torch.cuda.synchronize()
         # t0 = time.perf_counter()
-        if return_uncertainty:   
+        if return_uncertainty:
             with torch.no_grad():
                 self.transition_model.enable_mc_dropout()
 
@@ -552,7 +549,6 @@ class RSSM(nn.Module):
                 self.transition_model.disable_mc_dropout()
             # print(f"Uncertainty calculation time (ns): {(time.perf_counter_ns()- start_time)/1000_000}ms")
             return (imagined_prior_logits if return_logits else imagined_prior), recurrent_state, uncertainty
-
         return (imagined_prior_logits if return_logits else imagined_prior), recurrent_state
 
 
@@ -773,13 +769,13 @@ class PlayerDV3(nn.Module):
 
         # print("get actions: actions", actions)
         # print("get actions: self.actions", self.actions)
-
+        # print("shape_z", self.z_logits.shape)
         if not return_rssm_stuff:
             return actions
         else:
             return (actions, # tuple
                     self.recurrent_state, 
-                    self.z_logits.view(*self.z_logits.shape[:-2], self.stochastic_size * self.discrete_size), 
+                    self.z_logits,#.view(*self.z_logits.shape[:-2], self.stochastic_size * self.discrete_size), 
                     uncertainty)
 
 class Actor(nn.Module):

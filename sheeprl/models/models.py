@@ -65,13 +65,15 @@ class MCDropout(nn.Dropout):
     #     # x: (B, D)
     #     # create (MC, B, D) dropout masks
     #     ### custom dropout for MC for efficiency
-    #     input = input.expand(self.num_mc_repeat + 1, *(input.shape[1:]))
-    #     mask = torch.rand_like(input, device=input.device) > self.p
+    #     input = input.expand(self.num_mc_repeat + 1, *(input.shape[1:]))    ## +1 so we do one additional inference but without dropout
+    #     mask = (torch.rand_like(input, device=input.device) > self.p).type(dtype=torch.float32)
     #     ### make sure the first one is always kept
-    #     mask[0].fill_(1.0)
-    #     input = input * mask
-    #     input[1:] /= (1.0 - self.p)
-    #     return input
+    #     mask[0].fill_(1) ## <==> mask[0] = 1
+    #     mask.mul_(input)
+    #     mask[1:].div_(1.0 - self.p)
+    #     # mask[:] = mask * input  ## maybe here we avoid creating new tensor by working only on mask (which is already init)
+    #     # mask[1:] /= (1.0 - self.p)
+    #     return mask
 
             
 class MLP(nn.Module):

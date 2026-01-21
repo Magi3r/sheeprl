@@ -276,9 +276,12 @@ def train(
     #     actions = torch.cat(actor(imagined_latent_state.detach())[0], dim=-1)
     #     imagined_actions[i] = actions
     # print("Their Total imagination loop duration          :", (time.perf_counter_ns()- start_time_loop)/1000_000, "ms") ### ~ 50ms
-    # torch.cuda.synchronize()
+    torch.cuda.synchronize()
     start_time_loop = time.perf_counter_ns()
     for i in range(1, cfg.algo.horizon + 1):    ## lopin 15 times
+        ## TODO: Assumption: currently these values get detached before loss backward, so no WorldModel is trained here 
+        ##   (so we could combine both _transition calls in imagination for faster inference (one call for actual value, one only for uncertainties))
+
         return_uncertainty = True
         # if return_uncertainty: uncertainties = np.random.rand(1024)
 
@@ -305,24 +308,24 @@ def train(
         # start = time.perf_counter_ns()
             
         imagined_prior = imagined_prior.view(1, -1, stoch_state_size)   ## after: -> [1, 1024, 1024]
-        # torch.cuda.synchronize()
-        # start = time.perf_counter_ns()
+        # # torch.cuda.synchronize()
+        # # start = time.perf_counter_ns()
 
-        if return_uncertainty:
-            k: int = cfg.episodic_memory.k_neighbors
+        # if return_uncertainty:
+        #     k: int = cfg.episodic_memory.k_neighbors
 
-            uncertainty_mask = uncertainties > lookup_treshold          ## shape [1024]
+        #     uncertainty_mask = uncertainties > lookup_treshold          ## shape [1024]
 
-            ## ACDs: [num_uncertainties>_threashold, 1, 1024]
-            ACDs: torch.tensor = parallel_additive_correction_delta(recurrent_state[:, uncertainty_mask, :], 
-                                                                imagined_prior[:, uncertainty_mask, :], 
-                                                                actions[:, uncertainty_mask, :], 
-                                                                episodic_memory, 
-                                                                world_model, 
-                                                                k, 
-                                                                device=device)
+        #     ## ACDs: [num_uncertainties>_threashold, 1, 1024]
+        #     ACDs: torch.tensor = parallel_additive_correction_delta(recurrent_state[:, uncertainty_mask, :], 
+        #                                                         imagined_prior[:, uncertainty_mask, :], 
+        #                                                         actions[:, uncertainty_mask, :], 
+        #                                                         episodic_memory, 
+        #                                                         world_model, 
+        #                                                         k, 
+        #                                                         device=device)
 
-            imagined_prior[:, uncertainty_mask, :] += ACDs
+        #     imagined_prior[:, uncertainty_mask, :] += ACDs
         imagined_latent_state = torch.cat((imagined_prior, recurrent_state), -1)
         imagined_trajectories[i] = imagined_latent_state
         actions = torch.cat(actor(imagined_latent_state.detach())[0], dim=-1)
@@ -330,8 +333,8 @@ def train(
         # torch.cuda.synchronize()
         # print(f"calc parallel ACDs duration: {(time.perf_counter_ns()- start)/1000_000}ms for EM of size: {len(episodic_memory)}")
 
-    # torch.cuda.synchronize()
-    # print("Total imagination loop duration          :", (time.perf_counter_ns()- start_time_loop)/1000_000, "ms")### 
+    torch.cuda.synchronize()
+    print("Total imagination loop duration          :", (time.perf_counter_ns()- start_time_loop)/1000_000, "ms")### 
         
         # print(f"calc parallel ACDs duration: {(time.perf_counter_ns()- start)/1000_000}ms for EM of size: {len(episodic_memory)}")
             # print(f"parallel additive_correction_delta duration: {(time.perf_counter_ns()- start)/1000_000}ms for EM of size: {len(episodic_memory)}")
@@ -474,19 +477,19 @@ def rehearsal_train(fabric:             Fabric,
         batch_size (int): batch size, so number of trajectories used for training in parallel.
     """
 
-    traj_length = episodic_memory.trajectory_length     ## TODO: own trajectory length
+    traj_length = episodic_memory.trajectory_length
     recurrent_state_size = cfg.algo.world_model.recurrent_model.recurrent_state_size
     stochastic_size = cfg.algo.world_model.stochastic_size
     discrete_size = cfg.algo.world_model.discrete_size
     device = fabric.device
     # start_time = time.time()
-    all_recurrents_states, all_posteriors_logits, all_actions = episodic_memory.get_samples()
+    all_recurrents_states, all_posteriors_logits, all_actions, all_traj_indices = episodic_memory.get_samples()
     # end_time = time.time()
     # if False:
         # episodic_memory._prune_memory(10)
     # print(f"Get_Samples: {(end_time - start_time)/1000} seconds")
 
-    if all_recurrents_states is None: return 
+    if all_recurrents_states is None: return
     # print("get_samples types: ", all_recurrents_states.dtype, all_posteriors_logits.dtype, all_actions.dtype)
     # print("get_samples shape: ", all_recurrents_states.shape, all_posteriors_logits.shape, all_actions.shape) # (1,2,4096)(...)
     batch_size = min(batch_size, all_recurrents_states.shape[1])
@@ -518,13 +521,15 @@ def rehearsal_train(fabric:             Fabric,
             # print("recurrent_state shape:", recurrent_state.shape)
             # print("actions[k] shape:", actions[k].shape)
             #### THEIR SHAPES: imagined_prior shape: torch.Size([1, 1024, 1024]); recurrent_state shape: torch.Size([1, 1024, 4096]); actions shape: torch.Size([1, 1024, 6])
+            if k == 0:
+                imagined_prior_logits, recurrent_state, uncertainties = world_model.rssm.imagination(posteriors[k:k+1], recurrent_state, actions[k:k+1], return_logits=True, return_uncertainty=True) ## compute_stochastic_state -> from prior logits to prior
+                episodic_memory.uncertainty[all_traj_indices[i:i+j]] = uncertainties    ## Updating uncertainties
+            else:
+                imagined_prior_logits, recurrent_state = world_model.rssm.imagination(posteriors[k:k+1], recurrent_state, actions[k:k+1], return_logits=True, return_uncertainty=False) ## compute_stochastic_state -> from prior logits to prior
 
-            imagined_prior_logits, recurrent_state = world_model.rssm.imagination(posteriors[k:k+1], recurrent_state, actions[k:k+1], return_logits=True) ## compute_stochastic_state -> from prior logits to prior
             imagined_prior_logits = imagined_prior_logits.view(1, -1, stoch_state_size)
             # recurrent_states[i] = recurrent_state
             priors_logits[k + 1, : j] = imagined_prior_logits
-
-            ## TODO: UPDATE UNCERTAINTY IN EM!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!11111!!!!!!!!!!!
 
         # Reshape posterior and prior logits to shape [B, T, 32, 32]
         priors_logits = priors_logits.view(*priors_logits.shape[:-1], stochastic_size, discrete_size)
@@ -688,10 +693,10 @@ def main(fabric: Fabric, cfg: Dict[str, Any]):
         max_elements=cfg.episodic_memory.capacity,
         k_nn=cfg.episodic_memory.k_neighbors,
         prune_fraction =cfg.episodic_memory.prune_fraction,
-        time_to_live = cfg.episodic_memory.time_to_live, 
-        z_shape=cfg.algo.world_model.discrete_size*cfg.algo.world_model.stochastic_size,
-        h_shape=cfg.algo.world_model.recurrent_model.recurrent_state_size,
-        a_shape=actions_dim, # TODO not sure if shape is correct,
+        time_to_live = cfg.episodic_memory.time_to_live,
+        z_size=cfg.algo.world_model.discrete_size*cfg.algo.world_model.stochastic_size,
+        h_size=cfg.algo.world_model.recurrent_model.recurrent_state_size,
+        a_size=actions_dim[0], # TODO not sure if shape is correct,
         fabric=fabric
     )
 
@@ -898,8 +903,6 @@ def main(fabric: Fabric, cfg: Dict[str, Any]):
                     # print(episodic_memory)
                 ## Update Episodic Memory
                 # uncertainty = np.array([0.8])
-                # if iter_num > learning_starts:
-                #     print(f"shapes: {h} {z_logits}")
                 if cfg.episodic_memory.enable_rehersal_training:
                     episodic_memory.step(
                         h=h,
@@ -908,12 +911,6 @@ def main(fabric: Fabric, cfg: Dict[str, Any]):
                         uncertainty=uncertainty,
                         done=dones
                     )
-                    # episodic_memory.step(
-                    #     state={"deter": h, "stoch": z_logits},
-                    #     action=actions,
-                    #     uncertainty=uncertainty,
-                    #     done=dones
-                    # )
 
 
             step_data["is_first"] = np.zeros_like(step_data["terminated"])
@@ -1064,11 +1061,14 @@ def main(fabric: Fabric, cfg: Dict[str, Any]):
             fabric.log("EM/size", len(episodic_memory), policy_step)
             fabric.log("EM/write_z", write_z, policy_step)
             fabric.log("EM/read_z", read_z, policy_step)
-            fabric.log("EM/Env_Uncertainty", last_n_uncertainty_mean, policy_step)
-            fabric.log("EM/Dream_Uncertainty", read_dream_mean_std[0].cpu().numpy(), policy_step) # dont know if correct
             fabric.log("EM/Write_Treshold", (last_n_uncertainty_mean + write_z * last_n_uncertainty_std), policy_step)
             fabric.log("EM/Read_Treshold", (read_dream_mean_std[0].cpu().numpy() + read_z * read_dream_mean_std[1].cpu().numpy()), policy_step) # dont know if correct
-
+            fabric.log("EM/Env_Uncertainty", last_n_uncertainty_mean, policy_step)
+            fabric.log("EM/Img_Uncertainty", read_dream_mean_std[0].cpu().numpy(), policy_step) # dont know if correct
+            fabric.log("EM/EM_Age_Mean", (torch.mean((episodic_memory.birth_time[:len(episodic_memory)] - episodic_memory.step_counter).type(torch.float32)).cpu().numpy()) * -1, policy_step)
+            fabric.log("EM/EM_Age_Std", torch.std((episodic_memory.birth_time[:len(episodic_memory)] - episodic_memory.step_counter).type(torch.float32)).cpu().numpy(), policy_step)
+            fabric.log("EM/EM_Uncertainty_Mean", torch.mean(episodic_memory.uncertainty[:len(episodic_memory)]).cpu().numpy(), policy_step)
+            fabric.log("EM/EM_Uncertainty_Std", torch.std(episodic_memory.uncertainty[:len(episodic_memory)]).cpu().numpy(), policy_step)
             # Sync distributed timers
             if not timer.disabled:
                 timer_metrics = timer.compute()

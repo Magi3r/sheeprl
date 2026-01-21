@@ -231,7 +231,7 @@ def train(
     # Continues:     c0      c'1      c'2      c'3
     # where z0 comes from the posterior, while z'i is the imagined states (prior)
 
-    # Imagine trajectories in the latent space
+    # Imagine trajectories in the latent space 
     for i in range(1, cfg.algo.horizon + 1):
         imagined_prior, recurrent_state = world_model.rssm.imagination(imagined_prior, recurrent_state, actions)
         imagined_prior = imagined_prior.view(1, -1, stoch_state_size)

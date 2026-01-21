@@ -21,7 +21,7 @@ class GPUEpisodicMemory():
     """
     def __init__(self, trajectory_length: int, 
                  uncertainty_threshold: float, 
-                 z_shape, h_shape, a_shape, 
+                 z_size: int, h_size: int, a_size: int, 
                  k_nn: int = 5, 
                  max_elements: int = 1000, 
                  prune_fraction: float = 0.5,
@@ -45,13 +45,15 @@ class GPUEpisodicMemory():
         """
         self.device: torch.device = fabric.device if fabric is not None else torch.device("cpu")
 
-        self.solution()
         self.trajectory_length: int = trajectory_length
         self.uncertainty_threshold: float = uncertainty_threshold
-        self.h_shape = h_shape      # h_shape: 4096
-        self.z_shape = z_shape      # z_shape: 1024
-        self.a_shape = a_shape[0]   # a_shape: (6,)
-        self.key_size = self.h_shape + self.z_shape + self.a_shape
+        self.h_size = h_size      # h_shape: 4096
+        self.z_size = z_size      # z_shape: 1024
+        self.a_size = a_size      # a_shape: (6,)
+
+
+        print("shapes EM: ", self.h_size, self.z_size, self.a_size)
+        self.key_size = self.h_size + self.z_size + self.a_size
         """Size of the key vector (h, z, a)"""
 
         self.k_nn: int = k_nn
@@ -67,7 +69,7 @@ class GPUEpisodicMemory():
         self.idx: torch.Tensor         = torch.empty(self.max_elements, dtype=torch.int64, device = self.device)
         self.uncertainty: torch.Tensor = torch.empty(self.max_elements, dtype=torch.float32, device = self.device)
         self.birth_time: torch.Tensor  = torch.empty(self.max_elements, dtype=torch.int64, device = self.device)
-        self.next_z : torch.Tensor     = torch.empty((self.max_elements, self.z_shape), dtype=torch.float32, device = self.device)
+        self.next_z : torch.Tensor     = torch.empty((self.max_elements, self.z_size), dtype=torch.float32, device = self.device)
         
         self.current_trajectory: TrajectoryObject | None = None
         self.num_trajectories: int = 0  ## number of trajectories currently stored (and so also idx of last empty elem)
@@ -97,15 +99,17 @@ class GPUEpisodicMemory():
         """ Create new empty trajectory, that is accessible by a key.
         """
         # key: (h_t, z_t, a_t)
-        trajectory = self.current_trajectory if self.current_trajectory else TrajectoryObject(self.trajectory_length, a_shape=self.a_shape, z_shape=self.z_shape, device=self.device) # z_shape, action_shape
+        trajectory = self.current_trajectory if self.current_trajectory else TrajectoryObject(self.trajectory_length, a_size=self.a_size, z_size=self.z_size, device=self.device) # z_shape, action_shape
         self.current_trajectory = trajectory
 
         # self.trajectories[key] = (trajectory, trajectory.last_idx(), uncertainty)
         # self.trajectories[key] = [trajectory, trajectory.new_traj(), uncertainty, self.step_counter]
 
-        self.trajectories_tensor[self.num_trajectories][:self.h_shape] = h
-        self.trajectories_tensor[self.num_trajectories][self.h_shape:self.h_shape+self.z_shape] = z
-        self.trajectories_tensor[self.num_trajectories][-self.a_shape:] = a
+        ## shapes: [1 ,1 , 4096], ...
+
+        self.trajectories_tensor[self.num_trajectories][:self.h_size] = h
+        self.trajectories_tensor[self.num_trajectories][self.h_size:self.h_size+self.z_size] = z
+        self.trajectories_tensor[self.num_trajectories][-self.a_size:] = a
 
         self.traj_obj[self.num_trajectories] = trajectory
         self.idx[self.num_trajectories] = trajectory.new_traj()
@@ -163,28 +167,27 @@ class GPUEpisodicMemory():
         if not self.prev_state_stored:
             if (z is None):
                 return
-            self.prev_state[:self.h_shape] = h
-            self.prev_state[self.h_shape:self.h_shape+self.z_shape] = z
+            self.prev_state[:self.h_size] = h
+            self.prev_state[self.h_size:self.h_size+self.z_size] = z
             self.prev_state_stored = True
             return
-        
         # add new trajecory
         if uncertainty >= self.uncertainty_threshold:
             assert(self.prev_state is not None)
             # value = (z, h)          # (z_t, h_t)
-            # SHAPES: h: (1, 1, 4096); z_logits: (1, 1024); real_actions: (1, 1, 1); rewards: (1,); dones: (1,)
+            # SHAPES: h: (1, 1, 4096); z_logits: (1, 1, 1024); real_actions: (1, 1, 1); rewards: (1,); dones: (1,)
 
             if self.current_trajectory is not None and self.current_trajectory.free_space != 0:
-                self.__fill_traj(self.prev_state[-self.z_shape:], a)
-            if len(self) >= self.max_elements:
+                self.__fill_traj(self.prev_state[-self.z_size:], a)
+            if len(self) >= self.max_elements:    ## TODO: -1 really necessary 
                 self._prune_memory(prune_fraction=self.prune_fraction)
-            self.__create_traj(self.prev_state[:self.h_shape], self.prev_state[-self.z_shape:], a, uncertainty)
+            self.__create_traj(self.prev_state[:self.h_size], self.prev_state[-self.z_size:], a, uncertainty)
             ### store next z in seperate tensor for fast access during training (ACD)
-            self.next_z[self.num_trajectories] = self.prev_state[-self.z_shape:]
+            self.next_z[self.num_trajectories - 1] = z # self.prev_state[-self.z_shape:]
         # just fill trajectory space
         elif self.current_trajectory is not None and self.current_trajectory.free_space != 0:
             assert(self.prev_state_stored)
-            self.__fill_traj(self.prev_state[-self.z_shape:], a)
+            self.__fill_traj(self.prev_state[-self.z_size:], a)
         # no space: no trajectory
         else:
             self.current_trajectory = None
@@ -197,9 +200,9 @@ class GPUEpisodicMemory():
             self.current_trajectory = None
             self.prev_state_stored = False
         else:
-            self.prev_state[:self.h_shape] = h
-            self.prev_state[self.h_shape:self.h_shape+self.z_shape] = z
-            self.prev_state[-self.a_shape:] = a
+            self.prev_state[:self.h_size] = h
+            self.prev_state[self.h_size:self.h_size+self.z_size] = z
+            self.prev_state[-self.a_size:] = a
             self.prev_state_stored = True
 
         self.step_counter += 1
@@ -224,18 +227,21 @@ class GPUEpisodicMemory():
             skip_non_full_traj (bool): Decides whether incomplete trajectories are also returned.
         Returns:
             tuple:
-                initial_h (np.ndarray): Initial recurrent states with shape (num_trajectories, 4096).
-                z_all (np.ndarray): Latent state sequences (logits) with shape (trajectory_length + 1, num_trajectories, 1024).
-                a_all (np.ndarray): Action sequences with shape (trajectory_length + 1, num_trajectories, 1).
+                initial_h (torch.tensor): Initial recurrent states with shape (num_trajectories, 4096).
+                z_all (torch.tensor): Latent state sequences (logits) with shape (trajectory_length + 1, num_trajectories, 1024).
+                a_all (torch.tensor): Action sequences with shape (trajectory_length + 1, num_trajectories, 1).
+                returned_trajs_indices (torch.tensor): Indices of trajectories actually returned (since too short trajs are skipped).
         """
-        if len(self) == 0: return (None, None, None)
+        if len(self) == 0: return (None, None, None, None)
 
         ## Ones for non-invalid probability tensors
-        initial_h = torch.ones((1, self.num_trajectories, self.h_shape), dtype=torch.float32, device=self.device)
-        z_all = torch.ones((self.trajectory_length + 1, self.num_trajectories, self.z_shape), dtype=torch.float32, device=self.device)
-        a_all = torch.ones((self.trajectory_length + 1, self.num_trajectories, self.a_shape), dtype=torch.float32, device=self.device)
+        initial_h = torch.ones((1, self.num_trajectories, self.h_size), dtype=torch.float32, device=self.device)
+        z_all = torch.ones((self.trajectory_length + 1, self.num_trajectories, self.z_size), dtype=torch.float32, device=self.device)
+        a_all = torch.ones((self.trajectory_length + 1, self.num_trajectories, self.a_size), dtype=torch.float32, device=self.device)
         
         full_trajes = 0
+        returned_trajs_indices = torch.empty(self.num_trajectories, dtype=torch.int64, device=self.device)
+
         for i in range(self.num_trajectories):
         # for i, (key, val) in enumerate(self.trajectories.items()):  # val: (TrajectoryMemory, idx, uncertainty, time of birth)
             # value
@@ -245,20 +251,24 @@ class GPUEpisodicMemory():
 
             # print(f"trajectory.shape[0]::{trajectory.shape[0]}      - traj_nr: {traj_nr}")
             if skip_non_full_traj and (trajectory.shape[0] != self.trajectory_length): continue
+            
+            returned_trajs_indices[full_trajes] = i
             full_trajes +=1
 
-            z_s = torch.tensor(trajectory[:,:-self.a_shape], device=self.device)   # ! are logits # shape (length, 1024)
-            a_s = torch.tensor(trajectory[:,-self.a_shape:], device=self.device)    # shape(length, 
+            z_s = trajectory[:,:-self.a_size].detach().clone()   # ! are logits # shape (length, 1024)
+            a_s = trajectory[:,-self.a_size:].detach().clone()    # shape(length, 
 
             #  (h, z, a)
-            z_all[0, i] = self.trajectories_tensor[i, self.h_shape:-self.a_shape]
-            a_all[0, i] = self.trajectories_tensor[i, -self.a_shape:]
+            z_all[0, i] = self.trajectories_tensor[i, self.h_size:-self.a_size]
+            a_all[0, i] = self.trajectories_tensor[i, -self.a_size:]
             # z_all[0, i] = np.frombuffer(key[1], dtype=np.float32)  # from shape (512,) into shape (1024,)
             # a_all[0, i] = np.frombuffer(key[2], dtype=np.float32) 
             z_all[1:(z_s.shape[0]+1), i] = z_s
             a_all[1:(z_s.shape[0]+1), i] = a_s
-            initial_h[0, i] = self.trajectories_tensor[i, :self.h_shape]
+            initial_h[0, i] = self.trajectories_tensor[i, :self.h_size]
             # initial_h[0, i] = np.frombuffer(key[0], dtype=np.float32)#.reshape(4096)
+
+            
             
         # [h1, h2, ...] [zs, ...] [as, ...]
         # batch example: [h1, h2, h3]  [zs1, zs2, zs3] [as1, as2, as3]   ####### shape(sequenz, batch, 1024)
@@ -268,23 +278,7 @@ class GPUEpisodicMemory():
         z_all       = z_all[:, :full_trajes]
         a_all       = a_all[:, :full_trajes]
         
-        return (initial_h, z_all, a_all) 
-
-
-    def _flatten_key(self, key: np.ndarray, from_bytes: bool = False):
-        warnings.warn("depricated!")
-        return 
-        if from_bytes:
-            h = np.frombuffer(key[0], dtype=np.float32).flatten()
-            z = np.frombuffer(key[1], dtype=np.float32).flatten()  # from shape (512,) into shape (1024,)
-            a = np.frombuffer(key[2], dtype=np.float32).flatten()
-        else:
-            h = key[0].flatten() ## TODO: flatten needed here??
-            z = key[1].flatten()
-            a = key[2].flatten()
-
-        res = np.concatenate([h, z, a])
-        return res
+        return (initial_h, z_all, a_all, returned_trajs_indices[:full_trajes])
 
     def _prune_memory(self, prune_fraction: float, uncertainty_weight: float = 0.5, time_to_live_weight: float = 0.5) -> None:
         """Prune trajectories based on weighted relevancy and prune fraction.
@@ -303,15 +297,15 @@ class GPUEpisodicMemory():
         ## TODO: uncertainty maybe too small here
         
         # High score will be deleted
-        scores: torch.Tensor = uncertainty_weight * (1 - self.uncertainty) + time_to_live_weight * ((self.step_counter - self.birth_time) / self.time_to_live)
-        _, to_keep_indeces = torch.topk(scores, self.num_trajectories-to_prune_number, largest=False)  ## to_prune_mask = indices
+        scores: torch.Tensor = self.uncertainty * (1 - ((self.step_counter - self.birth_time) / self.time_to_live))
+        # scores: torch.Tensor = uncertainty_weight * (1 - self.uncertainty) + time_to_live_weight * ((self.step_counter - self.birth_time) / self.time_to_live)
+        _, to_keep_indeces = torch.topk(scores, self.num_trajectories-to_prune_number, largest=True)  ## to_prune_mask = indices
 
-        self.trajectories_tensor = self.trajectories_tensor[to_keep_indeces]
-
-        self.traj_obj = self.traj_obj[to_keep_indeces] 
-        self.idx = self.idx[to_keep_indeces] 
-        self.uncertainty = self.uncertainty[to_keep_indeces] 
-        self.birth_time = self.birth_time[to_keep_indeces] 
+        self.trajectories_tensor[0:self.num_trajectories-to_prune_number] = self.trajectories_tensor[to_keep_indeces]
+        self.traj_obj[0:self.num_trajectories-to_prune_number] = self.traj_obj[to_keep_indeces.cpu()]
+        self.idx[0:self.num_trajectories-to_prune_number] = self.idx[to_keep_indeces] 
+        self.uncertainty[0:self.num_trajectories-to_prune_number] = self.uncertainty[to_keep_indeces] 
+        self.birth_time[0:self.num_trajectories-to_prune_number] = self.birth_time[to_keep_indeces] 
 
         self.num_trajectories -= to_prune_number
         
@@ -336,16 +330,12 @@ class GPUEpisodicMemory():
                 print(solution)
         except FileNotFoundError as e:
             pass
-        
-    def update_uncertainty(self, uncertainties: torch.Tensor) -> None:
-        """Called in rehearsal training, updating uncertainty of ALL trajectories."""
-        self.uncertainty = uncertainties
     
 class TrajectoryObject:
     """
     Memory object for trajectories
     """
-    def __init__(self, trajectory_length: int, a_shape, z_shape, device: torch.device):
+    def __init__(self, trajectory_length: int, a_size: int, z_size: int, device: torch.device):
         """
         Docstring for __init__
         
@@ -354,8 +344,8 @@ class TrajectoryObject:
         """
         self.trajectory_length: int = trajectory_length
         """The maximum length each trajectory will have."""
-        self.a_shape = a_shape
-        self.z_shape = z_shape
+        self.a_shape = a_size
+        self.z_shape = z_size
         self.memory_width = self.z_shape+self.a_shape
         """How many entries each row will have."""
         
