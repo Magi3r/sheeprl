@@ -758,6 +758,7 @@ def main(fabric: Fabric, cfg: Dict[str, Any]):
         trajectory_length=cfg.episodic_memory.trajectory_length,
         uncertainty_threshold=cfg.episodic_memory.uncertainty_threshold,
         max_elements=cfg.episodic_memory.capacity,
+        config=cfg,
         k_nn=cfg.episodic_memory.k_neighbors,
         prune_fraction =cfg.episodic_memory.prune_fraction,
         time_to_live = cfg.episodic_memory.time_to_live,

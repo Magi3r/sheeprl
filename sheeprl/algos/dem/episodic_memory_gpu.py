@@ -22,6 +22,7 @@ class GPUEpisodicMemory():
     def __init__(self, trajectory_length: int, 
                  uncertainty_threshold: float, 
                  z_size: int, h_size: int, a_size: int, 
+                 config,
                  k_nn: int = 5, 
                  max_elements: int = 1000, 
                  prune_fraction: float = 0.5,
@@ -44,13 +45,13 @@ class GPUEpisodicMemory():
         :type time_to_live: int
         """
         self.device: torch.device = fabric.device if fabric is not None else torch.device("cpu")
+        self.cfg = config
 
         self.trajectory_length: int = trajectory_length
         self.uncertainty_threshold: float = uncertainty_threshold
         self.h_size = h_size      # h_shape: 4096
         self.z_size = z_size      # z_shape: 1024
         self.a_size = a_size      # a_shape: (6,)
-
 
         print("shapes EM: ", self.h_size, self.z_size, self.a_size)
         self.key_size = self.h_size + self.z_size + self.a_size
@@ -90,6 +91,9 @@ class GPUEpisodicMemory():
 
         warnings.warn("EpisodicMemory currently only works with a single environment instance!")
 
+        self.stochastic_size = self.cfg.algo.world_model.stochastic_size
+        self.discrete_size = self.cfg.algo.world_model.discrete_size
+
     def set_threshold(self, uncertainty_threshold: float =  0.9):
         self.uncertainty_threshold = uncertainty_threshold
 
@@ -106,15 +110,18 @@ class GPUEpisodicMemory():
         # self.trajectories[key] = (trajectory, trajectory.last_idx(), uncertainty)
         # self.trajectories[key] = [trajectory, trajectory.new_traj(), uncertainty, self.step_counter]
 
-        ## shapes: [1 ,1 , 4096], ...
+        ## shapes: torch.Size([4096]) torch.Size([1024]) torch.Size([1, 6])
 
         self.trajectories_tensor[self.num_trajectories][:self.h_size] = h
         self.trajectories_tensor[self.num_trajectories][self.h_size:self.h_size+self.z_size] = z
         self.trajectories_tensor[self.num_trajectories][-self.a_size:] = a
 
         self.trajectories_tensor_norm[self.num_trajectories][:self.h_size] = h
-        self.trajectories_tensor_norm[self.num_trajectories][self.h_size:self.h_size+self.z_size] = z
+        self.trajectories_tensor_norm[self.num_trajectories][self.h_size:self.h_size+self.z_size] = z.view(self.stochastic_size, self.discrete_size).softmax(dim=-1).view(-1)
         self.trajectories_tensor_norm[self.num_trajectories][-self.a_size:] = a
+
+        self.trajectories_tensor_norm[self.num_trajectories] = torch.nn.functional.normalize(self.trajectories_tensor_norm[self.num_trajectories], p=2, dim=-1)
+
 
         self.traj_obj[self.num_trajectories] = trajectory
         self.idx[self.num_trajectories] = trajectory.new_traj()
@@ -140,6 +147,8 @@ class GPUEpisodicMemory():
         traj_obj.del_traj(traj_index)
         
         self.trajectories_tensor[index:-1] = self.trajectories_tensor[index+1:]
+
+        self.trajectories_tensor_norm[index:-1] = self.trajectories_tensor_norm[index+1:]
 
         self.traj_obj[index:-1] = self.traj_obj[index+1:] 
         self.idx[index:-1] = self.idx[index+1:] 
@@ -309,6 +318,8 @@ class GPUEpisodicMemory():
         _, to_keep_indeces = torch.topk(scores, self.num_trajectories-to_prune_number, largest=True)  ## to_prune_mask = indices
 
         self.trajectories_tensor[0:self.num_trajectories-to_prune_number] = self.trajectories_tensor[to_keep_indeces]
+        self.trajectories_tensor_norm[0:self.num_trajectories-to_prune_number] = self.trajectories_tensor_norm[to_keep_indeces]
+
         self.traj_obj[0:self.num_trajectories-to_prune_number] = self.traj_obj[to_keep_indeces.cpu()]
         self.idx[0:self.num_trajectories-to_prune_number] = self.idx[to_keep_indeces] 
         self.uncertainty[0:self.num_trajectories-to_prune_number] = self.uncertainty[to_keep_indeces] 
@@ -321,12 +332,19 @@ class GPUEpisodicMemory():
             Args:
                 query (torch.Tensor): A batch of queries.
             Returns:
-                neighbors_keys (torch.Tensor): actual values, not the bytes anymore.
-                trajectory_first_elems (np.array): corresponding trajectories first elems - shape: (1024, k, z_size + a_size)
+                indices (torch.Tensor): indices of the k nearest neighbors for each query.
         """
         metric: str = "cosine" # "cosine" | "ip"
-        search_space: torch.Tensor = self.trajectories_tensor[:self.num_trajectories]   ## trajectories_tensor = torch.empty((self.max_elements, self.key_size), device = self.device)
-        indices, _scores = exact_search(query, search_space, k, metric=metric) ## , device=self.device
+
+        if self.cfg.episodic_memory.normalize_kNN:
+            search_space: torch.Tensor = self.trajectories_tensor_norm[:self.num_trajectories]   ## trajectories_tensor = torch.empty((self.max_elements, self.key_size), device = self.device)
+
+            query[:, self.h_size:self.h_size+self.z_size] = query[:, self.h_size:self.h_size+self.z_size].view(query.shape[0], self.stochastic_size, self.discrete_size).softmax(dim=-1).view(query.shape[0], -1)
+            query[:] = torch.nn.functional.normalize(query, p=2, dim=-1)
+            indices, _scores = exact_search(query, search_space, k, metric=metric) ## , device=self.device
+        else:
+            search_space: torch.Tensor = self.trajectories_tensor[:self.num_trajectories]   ## trajectories_tensor = torch.empty((self.max_elements, self.key_size), device = self.device)
+            indices, _scores = exact_search(query, search_space, k, metric=metric) ## , device=self.device
 
         return indices
 
