@@ -64,6 +64,7 @@ class GPUEpisodicMemory():
         ## CURRENTLY: if deleting 
         ## indirect connection between key & TrajObs (e.g. 3rd key = 3rd TrajObj = 3rd)
         self.trajectories_tensor: torch.Tensor = torch.empty((self.max_elements, self.key_size), device = self.device)
+        self.trajectories_tensor_norm: torch.Tensor = torch.empty((self.max_elements, self.key_size), device = self.device)
         ### on CPU an np because only references to Objects in RAM  (but traj data inside TrajObj on GPU)
         self.traj_obj: np.array        = np.empty(self.max_elements, dtype=object)            ## object refferences
         self.idx: torch.Tensor         = torch.empty(self.max_elements, dtype=torch.int64, device = self.device)
@@ -110,6 +111,10 @@ class GPUEpisodicMemory():
         self.trajectories_tensor[self.num_trajectories][:self.h_size] = h
         self.trajectories_tensor[self.num_trajectories][self.h_size:self.h_size+self.z_size] = z
         self.trajectories_tensor[self.num_trajectories][-self.a_size:] = a
+
+        self.trajectories_tensor_norm[self.num_trajectories][:self.h_size] = h
+        self.trajectories_tensor_norm[self.num_trajectories][self.h_size:self.h_size+self.z_size] = z
+        self.trajectories_tensor_norm[self.num_trajectories][-self.a_size:] = a
 
         self.traj_obj[self.num_trajectories] = trajectory
         self.idx[self.num_trajectories] = trajectory.new_traj()
@@ -287,6 +292,8 @@ class GPUEpisodicMemory():
             uncertainty_weight (float, optional): Weighting factor for uncertainty term. Defaults to 0.5.
             time_to_live_weight (float, optional): Weighting factor for time to life term. Defaults to 0.5.
         """
+        print("~"*10 + " Pruning Episodic Memory " + "~"*10)
+
         to_prune_number: int = int(self.num_trajectories * prune_fraction)
         # TODO: recalc. all uncertainties or do this in extra training?
 

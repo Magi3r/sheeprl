@@ -334,7 +334,7 @@ def train(
         # print(f"calc parallel ACDs duration: {(time.perf_counter_ns()- start)/1000_000}ms for EM of size: {len(episodic_memory)}")
 
     torch.cuda.synchronize()
-    print("Total imagination loop duration          :", (time.perf_counter_ns()- start_time_loop)/1000_000, "ms")### 
+    print("Total imagination loop duration          :", (time.perf_counter_ns()- start_time_loop)/1000_000, "ms for EM size:", len(episodic_memory))### 
         
         # print(f"calc parallel ACDs duration: {(time.perf_counter_ns()- start)/1000_000}ms for EM of size: {len(episodic_memory)}")
             # print(f"parallel additive_correction_delta duration: {(time.perf_counter_ns()- start)/1000_000}ms for EM of size: {len(episodic_memory)}")
@@ -523,6 +523,7 @@ def rehearsal_train(fabric:             Fabric,
             #### THEIR SHAPES: imagined_prior shape: torch.Size([1, 1024, 1024]); recurrent_state shape: torch.Size([1, 1024, 4096]); actions shape: torch.Size([1, 1024, 6])
             if k == 0:
                 imagined_prior_logits, recurrent_state, uncertainties = world_model.rssm.imagination(posteriors[k:k+1], recurrent_state, actions[k:k+1], return_logits=True, return_uncertainty=True) ## compute_stochastic_state -> from prior logits to prior
+                ## updating uncertainties in EM
                 episodic_memory.uncertainty[all_traj_indices[i:i+j]] = uncertainties    ## Updating uncertainties
             else:
                 imagined_prior_logits, recurrent_state = world_model.rssm.imagination(posteriors[k:k+1], recurrent_state, actions[k:k+1], return_logits=True, return_uncertainty=False) ## compute_stochastic_state -> from prior logits to prior
@@ -563,6 +564,72 @@ def rehearsal_train(fabric:             Fabric,
         priors_logits = priors_logits.detach()
 
     world_optimizer.zero_grad(set_to_none=True)
+
+def update_uncertainties(fabric:             Fabric,
+                         world_model:        WorldModel,
+                         
+                         cfg: Dict[str, Any],
+                         episodic_memory:    EM, 
+                         batch_size:         int     =64
+                        ) -> None:
+    """Updates uncertainties in EM by recalculating them from all valid samples.
+
+    Args:
+        fabric (Fabric): the fabric instance.
+        world_model (_FabricModule): the world model wrapped with Fabric.
+        cfg (DictConfig): the configs.
+        episodic_memory (EM): episodic memory training samples.
+        batch_size (int): batch size, so number of trajectories used for training in parallel.
+    """
+    ## TODO: reicht das, damit hier nix im torch tree ist?
+    with torch.no_grad():
+        traj_length = episodic_memory.trajectory_length
+        recurrent_state_size = cfg.algo.world_model.recurrent_model.recurrent_state_size
+        stochastic_size = cfg.algo.world_model.stochastic_size
+        discrete_size = cfg.algo.world_model.discrete_size
+        device = fabric.device
+        # start_time = time.time()
+        all_recurrents_states, all_posteriors_logits, all_actions, all_traj_indices = episodic_memory.get_samples()
+        # end_time = time.time()
+        # if False:
+            # episodic_memory._prune_memory(10)
+        # print(f"Get_Samples: {(end_time - start_time)/1000} seconds")
+
+        if all_recurrents_states is None: return
+        # print("get_samples types: ", all_recurrents_states.dtype, all_posteriors_logits.dtype, all_actions.dtype)
+        # print("get_samples shape: ", all_recurrents_states.shape, all_posteriors_logits.shape, all_actions.shape) # (1,2,4096)(...)
+        batch_size = min(batch_size, all_recurrents_states.shape[1])
+        stoch_state_size = stochastic_size * discrete_size  ## e.g. 32x32
+        # recurrent_state = torch.zeros(1, batch_size, recurrent_state_size, device=device)
+        # recurrent_states = torch.empty(traj_length, batch_size, recurrent_state_size, device=device)
+        priors_logits = torch.empty(traj_length + 1, batch_size, stoch_state_size, device=device)
+        for i in range(0, all_recurrents_states.shape[1], batch_size):
+            # print("rehearsal train BATCH_INDEX: ", i)
+            priors_logits = priors_logits.view(traj_length + 1, batch_size, stoch_state_size)
+            # posteriors_logits = posteriors_logits.view(*posteriors_logits.shape[:-2], stoch_state_size)
+
+            j = min(batch_size, max(all_recurrents_states.shape[1]-i, 0)) ### (only relevant for last batch (i mean the calculation))
+            if j==0: continue
+
+            recurrent_state = all_recurrents_states[:, i:i+j]
+            posteriors_logits = all_posteriors_logits[:, i:i+j]
+            actions = all_actions[:, i:i+j]
+
+            posteriors = compute_stochastic_state(posteriors_logits) ## torch.empty(traj_length, batch_size, stochastic_size, discrete_size, device=device)
+            posteriors = posteriors.view(*posteriors.shape[:-2], -1)
+            priors_logits[0, : j], _ = world_model.rssm._transition(recurrent_state)
+
+            # print("posteriors_logits shape:", posteriors_logits.shape)
+            for k in range(0, traj_length):
+                ## ^z, h
+                # print("posteriors[k] shape:", posteriors[k].shape)
+                # print("recurrent_state shape:", recurrent_state.shape)
+                # print("actions[k] shape:", actions[k].shape)
+                #### THEIR SHAPES: imagined_prior shape: torch.Size([1, 1024, 1024]); recurrent_state shape: torch.Size([1, 1024, 4096]); actions shape: torch.Size([1, 1024, 6])
+                if k == 0:
+                    _, recurrent_state, uncertainties = world_model.rssm.imagination(posteriors[k:k+1], recurrent_state, actions[k:k+1], return_logits=True, return_uncertainty=True) ## compute_stochastic_state -> from prior logits to prior
+                    ## updating uncertainties in EM
+                    episodic_memory.uncertainty[all_traj_indices[i:i+j]] = uncertainties    ## Updating uncertainties
 
 @register_algorithm()
 def main(fabric: Fabric, cfg: Dict[str, Any]):
@@ -796,6 +863,7 @@ def main(fabric: Fabric, cfg: Dict[str, Any]):
     last_n_uncertainty_mean = 0.0
     last_n_uncertainty_std  = 0.0
 
+    print(f"Fill buffer at max ~{learning_starts} times and then train")
     for iter_num in tqdm(range(start_iter, total_iters + 1)):
         policy_step += policy_steps_per_iter
         # print(f"=== Iteration {iter_num} / {total_iters}, Policy Step: {policy_step} ===")
@@ -831,7 +899,27 @@ def main(fabric: Fabric, cfg: Dict[str, Any]):
                             axis=-1,
                         )
                     h, z_logits, uncertainty = None, None, 0.0
+
+                    ## add all samples into EM with high uncertainty to ensure they are stored (they are updated anyways later)
+                    if cfg.episodic_memory.fill_parallel_to_buffer:
+                        ## TODO: do we need a zero grad here?
+                        torch_obs = prepare_obs(fabric, obs, cnn_keys=cfg.algo.cnn_keys.encoder, num_envs=cfg.env.num_envs)
+                        mask = {k: v for k, v in torch_obs.items() if k.startswith("mask")}
+                        if len(mask) == 0:
+                            mask = None
+                        ## TODO: add additional param so we not always calc meaningless uncertainty u?
+                        h, z_logits = player.get_hidden_prior(torch_obs, torch.from_numpy(actions).to(device=device).unsqueeze(0)) ## TODO: not performant!!
+                        ## shapes z and a:  torch.Size([1, 1, 1024]) torch.Size([1, 1, 6])
+                        ## TODO: should we add random actions or predicted actions in EM (currently insert rnd. actions)?
+                        uncertainty = torch.tensor([1.0], device=device)   ## high uncertainty to ensure insertion TODO: uncertainty hardcoded
                 else:
+                    # update_uncertainties(
+                    #     fabric          = fabric,
+                    #     world_model     = world_model,
+                    #     cfg             = cfg,
+                    #     episodic_memory = episodic_memory
+                    # )
+
                     torch_obs = prepare_obs(fabric, obs, cnn_keys=cfg.algo.cnn_keys.encoder, num_envs=cfg.env.num_envs)
                     mask = {k: v for k, v in torch_obs.items() if k.startswith("mask")}
                     if len(mask) == 0:
@@ -850,10 +938,8 @@ def main(fabric: Fabric, cfg: Dict[str, Any]):
                             torch.stack([real_act.argmax(dim=-1) for real_act in real_actions], dim=-1).cpu().numpy()
                         )
                     
-                    ## TODO: additive correction term
-                    ## additive_correction_delta()
                 ### update ems uncertainty treshold
-                if z_logits is not None:
+                if (z_logits is not None) and (iter_num > learning_starts):
                     last_N_env_uncertainties[iter_num % last_N_env_uncertainties.shape[0]] = uncertainty    ## here add single value
                     last_n_uncertainty_mean = np.mean(last_N_env_uncertainties)
                     last_n_uncertainty_std = np.std(last_N_env_uncertainties)
@@ -903,15 +989,14 @@ def main(fabric: Fabric, cfg: Dict[str, Any]):
                     # print(episodic_memory)
                 ## Update Episodic Memory
                 # uncertainty = np.array([0.8])
-                if cfg.episodic_memory.enable_rehersal_training:
-                    episodic_memory.step(
-                        h=h,
-                        z=z_logits,
-                        a=actions,
-                        uncertainty=uncertainty,
-                        done=dones
-                    )
-
+                # if cfg.episodic_memory.enable_rehersal_training:
+                episodic_memory.step(
+                    h=h,
+                    z=z_logits,
+                    a=actions,
+                    uncertainty=uncertainty,
+                    done=dones
+                )
 
             step_data["is_first"] = np.zeros_like(step_data["terminated"])
             if "restart_on_exception" in infos:

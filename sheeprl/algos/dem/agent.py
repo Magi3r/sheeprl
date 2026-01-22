@@ -777,7 +777,28 @@ class PlayerDV3(nn.Module):
                     self.recurrent_state, 
                     self.z_logits,#.view(*self.z_logits.shape[:-2], self.stochastic_size * self.discrete_size), 
                     uncertainty)
+        
+    ## for EM use only ~Josch
+    def get_hidden_prior(self, obs: Dict[str, Tensor], actions: torch.Tensor) -> Tensor:
+        """Return the hidden state and prior based on observation. 
+            Current idea: only use this in the buffer filling phase to get (h,z) for EM.
 
+        Returns:
+            The hidden state and prior logits.
+        """
+        embedded_obs = self.encoder(obs)    ## (first part from Encoder of the paper)
+        ### h
+        self.recurrent_state = self.rssm.recurrent_model(
+            torch.cat((self.stochastic_state, actions), -1), self.recurrent_state
+        )
+
+            ### z            
+        self.z_logits, self.stochastic_state = self.rssm._representation(self.recurrent_state, embedded_obs)    ## z (second part from Encoder of the paper)
+        self.stochastic_state = self.stochastic_state.view(
+            *self.stochastic_state.shape[:-2], self.stochastic_size * self.discrete_size
+        )
+        return self.recurrent_state, self.z_logits
+    
 class Actor(nn.Module):
     """
     The wrapper class of the Dreamer_v2 Actor model.
