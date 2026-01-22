@@ -903,16 +903,15 @@ def main(fabric: Fabric, cfg: Dict[str, Any]):
 
                     ## add all samples into EM with high uncertainty to ensure they are stored (they are updated anyways later)
                     if cfg.episodic_memory.fill_parallel_to_buffer:
-                        ## TODO: do we need a zero grad here?
                         torch_obs = prepare_obs(fabric, obs, cnn_keys=cfg.algo.cnn_keys.encoder, num_envs=cfg.env.num_envs)
                         mask = {k: v for k, v in torch_obs.items() if k.startswith("mask")}
                         if len(mask) == 0:
                             mask = None
-                        ## TODO: add additional param so we not always calc meaningless uncertainty u?
-                        h, z_logits = player.get_hidden_prior(torch_obs, torch.from_numpy(actions).to(device=device).unsqueeze(0)) ## TODO: not performant!!
+                        with torch.no_grad():
+                            h, z_logits = player.get_hidden_prior(torch_obs, torch.from_numpy(actions).to(device=device).unsqueeze(0)) ## TODO: not performant!!
                         ## shapes z and a:  torch.Size([1, 1, 1024]) torch.Size([1, 1, 6])
                         ## TODO: should we add random actions or predicted actions in EM (currently insert rnd. actions)?
-                        uncertainty = torch.tensor([1.0], device=device)   ## high uncertainty to ensure insertion TODO: uncertainty hardcoded
+                        uncertainty = torch.tensor([1.0], device=device)
                 else:
                     # update_uncertainties(
                     #     fabric          = fabric,
