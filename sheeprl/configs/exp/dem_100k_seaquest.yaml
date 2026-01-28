@@ -1,0 +1,30 @@
+# @package _global_
+
+defaults:
+  - dem
+  - override /algo: dem
+  - override /env: atari
+  - _self_
+
+# Experiment
+seed: 5
+
+# Environment
+env:
+  num_envs: 1
+  max_episode_steps: 27000 ## 432000
+  id: SeaquestNoFrameskip-v4
+
+# Checkpoint
+checkpoint:
+  every: 100000
+
+# Buffer
+buffer:
+  size: 100000
+  checkpoint: True
+
+# Algorithm
+algo:
+  total_steps: 100000
+  learning_starts: 1024

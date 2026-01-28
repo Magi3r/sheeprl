@@ -173,3 +173,5 @@ mlartifacts
 examples/models
 session_*
 bin/
+
+multirun/

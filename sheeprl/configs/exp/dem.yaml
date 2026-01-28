@@ -7,15 +7,17 @@ defaults:
 ## Episodic Memory Stuff ##
 episodic_memory:
   trajectory_length: 20
-  capacity: 1024
-  k_neighbors: 5
+  capacity: 512
+  k_neighbors: 10
   uncertainty_threshold: 0.9
   prune_fraction: 0.2
   time_to_live: 100
   rehersal_train_every: 512
   enable_rehersal_training: true
+  use_acd: true
   fill_parallel_to_buffer: true
-  normalize_kNN: true
+  normalize_kNN: false
+  softmax_kNN: false             # apply softmax to z in key
 
   ### legacy, will remove if nothings breaks ###
   # read_threshold_last_N: 128

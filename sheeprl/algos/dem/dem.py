@@ -276,56 +276,39 @@ def train(
     #     actions = torch.cat(actor(imagined_latent_state.detach())[0], dim=-1)
     #     imagined_actions[i] = actions
     # print("Their Total imagination loop duration          :", (time.perf_counter_ns()- start_time_loop)/1000_000, "ms") ### ~ 50ms
-    torch.cuda.synchronize()
-    start_time_loop = time.perf_counter_ns()
+    # torch.cuda.synchronize()
+    # start_time_loop = time.perf_counter_ns()
     for i in range(1, cfg.algo.horizon + 1):    ## lopin 15 times
         ## TODO: Assumption: currently these values get detached before loss backward, so no WorldModel is trained here 
         ##   (so we could combine both _transition calls in imagination for faster inference (one call for actual value, one only for uncertainties))
 
-        return_uncertainty = True
-        # if return_uncertainty: uncertainties = np.random.rand(1024)
 
-        # start = time.perf_counter_ns()
-        imagined_prior, recurrent_state, uncertainties = world_model.rssm.imagination(imagined_prior, recurrent_state, actions, return_uncertainty = return_uncertainty)
-        # print(f"their imag duration:{(time.perf_counter_ns()- start)/1000_000}ms")
-        # imagined_prior, recurrent_state = world_model.rssm.imagination(imagined_prior, recurrent_state, actions, return_uncertainty = return_uncertainty)
-        
-        # # print(uncertainties.shape)
-        # # print(torch.std(uncertainties).cpu().numpy())
+        imagined_prior, recurrent_state, uncertainties = world_model.rssm.imagination(imagined_prior, recurrent_state, actions, return_uncertainty = True)
 
-        # start = time.perf_counter_ns()
         ### update treshold based on rolling mean and std ~0.145592ms
         read_dream_mean_std[0] = torch.mean(uncertainties) * cfg.episodic_memory.read_exp_mov_avg_alpha + read_dream_mean_std[0] * (1 - cfg.episodic_memory.read_exp_mov_avg_alpha)           
         read_dream_mean_std[1] = torch.std(uncertainties) * cfg.episodic_memory.read_exp_mov_avg_alpha + read_dream_mean_std[1] * (1 - cfg.episodic_memory.read_exp_mov_avg_alpha)
         lookup_treshold = read_dream_mean_std[0] + read_z * read_dream_mean_std[1]
-        # print(f"uncertainty threshold calculation   :{(time.perf_counter_ns()- start)/1000_000}ms")
 
-        # print(" updated read_dream_mean_std:", read_dream_mean_std, " lookup_treshold:", lookup_treshold)
-        # start = time.perf_counter_ns()
-
-        # print(f"rest of imagination loop duration   :{(time.perf_counter_ns()- start)/1000_000}ms")
-        # Create a boolean mask based on the uncertainty array
-        # start = time.perf_counter_ns()
-            
+    
         imagined_prior = imagined_prior.view(1, -1, stoch_state_size)   ## after: -> [1, 1024, 1024]
-        # # torch.cuda.synchronize()
-        # # start = time.perf_counter_ns()
 
-        # if return_uncertainty:
-        #     k: int = cfg.episodic_memory.k_neighbors
 
-        #     uncertainty_mask = uncertainties > lookup_treshold          ## shape [1024]
+        if cfg.episodic_memory.use_acd:
+            k: int = cfg.episodic_memory.k_neighbors
 
-        #     ## ACDs: [num_uncertainties>_threashold, 1, 1024]
-        #     ACDs: torch.tensor = parallel_additive_correction_delta(recurrent_state[:, uncertainty_mask, :], 
-        #                                                         imagined_prior[:, uncertainty_mask, :], 
-        #                                                         actions[:, uncertainty_mask, :], 
-        #                                                         episodic_memory, 
-        #                                                         world_model, 
-        #                                                         k, 
-        #                                                         device=device)
+            uncertainty_mask = uncertainties > lookup_treshold          ## shape [1024]
 
-        #     imagined_prior[:, uncertainty_mask, :] += ACDs
+            ## ACDs: [num_uncertainties>_threashold, 1, 1024]
+            ACDs: torch.tensor = parallel_additive_correction_delta(recurrent_state[:, uncertainty_mask, :], 
+                                                                imagined_prior[:, uncertainty_mask, :], 
+                                                                actions[:, uncertainty_mask, :], 
+                                                                episodic_memory, 
+                                                                world_model, 
+                                                                k, 
+                                                                device=device)
+
+            imagined_prior[:, uncertainty_mask, :] += ACDs
         imagined_latent_state = torch.cat((imagined_prior, recurrent_state), -1)
         imagined_trajectories[i] = imagined_latent_state
         actions = torch.cat(actor(imagined_latent_state.detach())[0], dim=-1)
@@ -333,8 +316,8 @@ def train(
         # torch.cuda.synchronize()
         # print(f"calc parallel ACDs duration: {(time.perf_counter_ns()- start)/1000_000}ms for EM of size: {len(episodic_memory)}")
 
-    torch.cuda.synchronize()
-    print("Total imagination loop duration          :", (time.perf_counter_ns()- start_time_loop)/1000_000, "ms for EM size:", len(episodic_memory))### 
+    # torch.cuda.synchronize()
+    # print("Total imagination loop duration          :", (time.perf_counter_ns()- start_time_loop)/1000_000, "ms for EM size:", len(episodic_memory))### 
         
         # print(f"calc parallel ACDs duration: {(time.perf_counter_ns()- start)/1000_000}ms for EM of size: {len(episodic_memory)}")
             # print(f"parallel additive_correction_delta duration: {(time.perf_counter_ns()- start)/1000_000}ms for EM of size: {len(episodic_memory)}")

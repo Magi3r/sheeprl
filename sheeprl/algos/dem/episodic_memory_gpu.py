@@ -65,7 +65,7 @@ class GPUEpisodicMemory():
         ## CURRENTLY: if deleting 
         ## indirect connection between key & TrajObs (e.g. 3rd key = 3rd TrajObj = 3rd)
         self.trajectories_tensor: torch.Tensor = torch.empty((self.max_elements, self.key_size), device = self.device)
-        self.trajectories_tensor_norm: torch.Tensor = torch.empty((self.max_elements, self.key_size), device = self.device)
+        self.trajectories_tensor_knn: torch.Tensor = torch.empty((self.max_elements, self.key_size), device = self.device)
         ### on CPU an np because only references to Objects in RAM  (but traj data inside TrajObj on GPU)
         self.traj_obj: np.array        = np.empty(self.max_elements, dtype=object)            ## object refferences
         self.idx: torch.Tensor         = torch.empty(self.max_elements, dtype=torch.int64, device = self.device)
@@ -103,32 +103,38 @@ class GPUEpisodicMemory():
     def __create_traj(self, h: torch.Tensor, z: torch.Tensor, a: torch.Tensor, uncertainty: float):
         """ Create new empty trajectory, that is accessible by a key.
         """
+        with torch.no_grad():
         # key: (h_t, z_t, a_t)
-        trajectory = self.current_trajectory if self.current_trajectory else TrajectoryObject(self.trajectory_length, a_size=self.a_size, z_size=self.z_size, device=self.device) # z_shape, action_shape
-        self.current_trajectory = trajectory
+            trajectory = self.current_trajectory if self.current_trajectory else TrajectoryObject(self.trajectory_length, a_size=self.a_size, z_size=self.z_size, device=self.device) # z_shape, action_shape
+            self.current_trajectory = trajectory
 
-        # self.trajectories[key] = (trajectory, trajectory.last_idx(), uncertainty)
-        # self.trajectories[key] = [trajectory, trajectory.new_traj(), uncertainty, self.step_counter]
+            # self.trajectories[key] = (trajectory, trajectory.last_idx(), uncertainty)
+            # self.trajectories[key] = [trajectory, trajectory.new_traj(), uncertainty, self.step_counter]
 
-        ## shapes: torch.Size([4096]) torch.Size([1024]) torch.Size([1, 6])
+            ## shapes: torch.Size([4096]) torch.Size([1024]) torch.Size([1, 6])
 
-        self.trajectories_tensor[self.num_trajectories][:self.h_size] = h
-        self.trajectories_tensor[self.num_trajectories][self.h_size:self.h_size+self.z_size] = z
-        self.trajectories_tensor[self.num_trajectories][-self.a_size:] = a
+            self.trajectories_tensor[self.num_trajectories][:self.h_size] = h
+            self.trajectories_tensor[self.num_trajectories][self.h_size:self.h_size+self.z_size] = z
+            self.trajectories_tensor[self.num_trajectories][-self.a_size:] = a
 
-        self.trajectories_tensor_norm[self.num_trajectories][:self.h_size] = h
-        self.trajectories_tensor_norm[self.num_trajectories][self.h_size:self.h_size+self.z_size] = z.view(self.stochastic_size, self.discrete_size).softmax(dim=-1).view(-1)
-        self.trajectories_tensor_norm[self.num_trajectories][-self.a_size:] = a
+            self.trajectories_tensor_knn[self.num_trajectories][:self.h_size] = h
+            if self.cfg.episodic_memory.softmax_kNN:
+                self.trajectories_tensor_knn[self.num_trajectories][self.h_size:self.h_size+self.z_size] = z.view(self.stochastic_size, self.discrete_size).softmax(dim=-1).view(-1)
+            else:
+                self.trajectories_tensor_knn[self.num_trajectories][self.h_size:self.h_size+self.z_size] = z
+            self.trajectories_tensor_knn[self.num_trajectories][-self.a_size:] = a
 
-        self.trajectories_tensor_norm[self.num_trajectories] = torch.nn.functional.normalize(self.trajectories_tensor_norm[self.num_trajectories], p=2, dim=-1)
+            if self.cfg.episodic_memory.normalize_kNN:
+                self.trajectories_tensor_knn[self.num_trajectories, self.h_size:self.h_size+self.z_size] = torch.nn.functional.normalize(self.trajectories_tensor_knn[self.num_trajectories, self.h_size:self.h_size+self.z_size], p=2, dim=-1)
+                self.trajectories_tensor[self.num_trajectories, :self.h_size] = torch.nn.functional.normalize(self.trajectories_tensor[self.num_trajectories, :self.h_size], p=2, dim=-1)
 
 
-        self.traj_obj[self.num_trajectories] = trajectory
-        self.idx[self.num_trajectories] = trajectory.new_traj()
-        self.uncertainty[self.num_trajectories] = uncertainty
-        self.birth_time[self.num_trajectories] = self.step_counter
+            self.traj_obj[self.num_trajectories] = trajectory
+            self.idx[self.num_trajectories] = trajectory.new_traj()
+            self.uncertainty[self.num_trajectories] = uncertainty
+            self.birth_time[self.num_trajectories] = self.step_counter
 
-        self.num_trajectories += 1
+            self.num_trajectories += 1
         
     def __fill_traj(self, z: torch.Tensor, a: torch.Tensor) -> None:
         """ Adds a new transition (z, a) to the current trajectory. If the trajectory becomes full, it clears current_trajectory."""
@@ -148,7 +154,7 @@ class GPUEpisodicMemory():
         
         self.trajectories_tensor[index:-1] = self.trajectories_tensor[index+1:]
 
-        self.trajectories_tensor_norm[index:-1] = self.trajectories_tensor_norm[index+1:]
+        self.trajectories_tensor_knn[index:-1] = self.trajectories_tensor_knn[index+1:]
 
         self.traj_obj[index:-1] = self.traj_obj[index+1:] 
         self.idx[index:-1] = self.idx[index+1:] 
@@ -318,7 +324,7 @@ class GPUEpisodicMemory():
         _, to_keep_indeces = torch.topk(scores, self.num_trajectories-to_prune_number, largest=True)  ## to_prune_mask = indices
 
         self.trajectories_tensor[0:self.num_trajectories-to_prune_number] = self.trajectories_tensor[to_keep_indeces]
-        self.trajectories_tensor_norm[0:self.num_trajectories-to_prune_number] = self.trajectories_tensor_norm[to_keep_indeces]
+        self.trajectories_tensor_knn[0:self.num_trajectories-to_prune_number] = self.trajectories_tensor_knn[to_keep_indeces]
 
         self.traj_obj[0:self.num_trajectories-to_prune_number] = self.traj_obj[to_keep_indeces.cpu()]
         self.idx[0:self.num_trajectories-to_prune_number] = self.idx[to_keep_indeces] 
@@ -334,19 +340,20 @@ class GPUEpisodicMemory():
             Returns:
                 indices (torch.Tensor): indices of the k nearest neighbors for each query.
         """
-        metric: str = "cosine" # "cosine" | "ip"
+        with torch.no_grad():
+            metric: str = "cosine" # "cosine" | "ip"
 
-        if self.cfg.episodic_memory.normalize_kNN:
-            search_space: torch.Tensor = self.trajectories_tensor_norm[:self.num_trajectories]   ## trajectories_tensor = torch.empty((self.max_elements, self.key_size), device = self.device)
+            if self.cfg.episodic_memory.softmax_kNN:
+                query[:, self.h_size:self.h_size+self.z_size] = query[:, self.h_size:self.h_size+self.z_size].view(query.shape[0], self.stochastic_size, self.discrete_size).softmax(dim=-1).view(query.shape[0], -1)
 
-            query[:, self.h_size:self.h_size+self.z_size] = query[:, self.h_size:self.h_size+self.z_size].view(query.shape[0], self.stochastic_size, self.discrete_size).softmax(dim=-1).view(query.shape[0], -1)
-            query[:] = torch.nn.functional.normalize(query, p=2, dim=-1)
+            if self.cfg.episodic_memory.normalize_kNN:
+                query[:, self.h_size:self.h_size+self.z_size] = torch.nn.functional.normalize(query[:, self.h_size:self.h_size+self.z_size], p=2, dim=-1)
+                query[:, :self.h_size]                        = torch.nn.functional.normalize(query[:, :self.h_size], p=2, dim=-1)
+                
+            search_space: torch.Tensor = self.trajectories_tensor_knn[:self.num_trajectories]   ## trajectories_tensor = torch.empty((self.max_elements, self.key_size), device = self.device)
             indices, _scores = exact_search(query, search_space, k, metric=metric) ## , device=self.device
-        else:
-            search_space: torch.Tensor = self.trajectories_tensor[:self.num_trajectories]   ## trajectories_tensor = torch.empty((self.max_elements, self.key_size), device = self.device)
-            indices, _scores = exact_search(query, search_space, k, metric=metric) ## , device=self.device
 
-        return indices
+            return indices
 
     def solution(self, file_path="./sheeprl/algos/dem/solution.txt"):
         try:
