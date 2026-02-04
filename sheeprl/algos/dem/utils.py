@@ -279,7 +279,7 @@ def additive_correction_delta(key: tuple[np.array, np.array, np.array], episodic
 
     return acd
 
-def parallel_additive_correction_delta(recurrent_states: torch.tensor, prior_logits: torch.tensor, actions: torch.tensor, episodic_memory: EM, world_model: WorldModel, k: int, device: torch.device) -> torch.tensor:
+def parallel_additive_correction_delta(recurrent_states: torch.tensor, prior_logits: torch.tensor, actions: torch.tensor, episodic_memory: EM, world_model: WorldModel, k: int, device: torch.device, cfg) -> torch.tensor:
     """Calculating Additive Correction Delta (ACD)
     
     Args:
@@ -300,10 +300,16 @@ def parallel_additive_correction_delta(recurrent_states: torch.tensor, prior_log
             # print("warning: EM is empty")
             return torch.zeros((their_seq, z_size)).to(device=device)
 
-        keys = torch.cat([recurrent_states, prior_logits, actions], dim=-1)[0]  ### shape: [1, 1024, 5126]
-        indices = episodic_memory.kNN_gpu(keys, k).flatten() ## indices shape: (1024 * k)
+        keys = torch.cat([recurrent_states, prior_logits, actions], dim=-1)[0]  ### shape: [1, num_uncertain_things, 5126]; num_uncertain_things -> at max 1024
+        indices, scores = episodic_memory.kNN_gpu(keys, k)
+        # print("score shape: ", scores.shape)  ## torch.Size([483, 10])
+        indices = indices.view(-1)#flatten() ## indices shape: (num_uncertain_things * k)
         # print(f"KNN part duration                       : {(time.perf_counter_ns()- start)/1000_000}ms")
-
+        if cfg.episodic_memory.adc_weighting:
+            sum_scores = torch.sum(scores, dim=1, keepdim=True) + 1e-12
+            scores[:] = scores / sum_scores #.unsqueeze(-1)
+            # print("weights shape: ", weights.shape)
+            scores = scores.view(their_seq, k, 1)
         # start = time.perf_counter_ns()
         nn_keys = episodic_memory.trajectories_tensor[indices]
 
@@ -333,7 +339,11 @@ def parallel_additive_correction_delta(recurrent_states: torch.tensor, prior_log
         ## calculate additive correction delta
         acd = next_prior_logits - next_imagined_prior_logits
         acd = acd.view(their_seq, k, z_size)
-        acd = torch.mean(acd, dim=1)
+        if cfg.episodic_memory.adc_weighting:
+            acd[:] = acd.mul(scores)
+            acd = acd.sum(1)
+        else:
+            acd = torch.mean(acd, dim=1)
         
         # print(f"MODEL INFERENCE + LAST ACD part duration: {(time.perf_counter_ns() - start)/1000_000}ms")
 

@@ -73,7 +73,7 @@ def train(
     is_continuous: bool,
     actions_dim: Sequence[int],
     moments: Moments,
-    episodic_memory: EM,
+    episodic_memory: EM | None,
     read_dream_mean_std: torch.tensor,
     read_z: float = 1.0,
 ) -> None:
@@ -286,29 +286,28 @@ def train(
         imagined_prior, recurrent_state, uncertainties = world_model.rssm.imagination(imagined_prior, recurrent_state, actions, return_uncertainty = True)
 
         ### update treshold based on rolling mean and std ~0.145592ms
-        read_dream_mean_std[0] = torch.mean(uncertainties) * cfg.episodic_memory.read_exp_mov_avg_alpha + read_dream_mean_std[0] * (1 - cfg.episodic_memory.read_exp_mov_avg_alpha)           
-        read_dream_mean_std[1] = torch.std(uncertainties) * cfg.episodic_memory.read_exp_mov_avg_alpha + read_dream_mean_std[1] * (1 - cfg.episodic_memory.read_exp_mov_avg_alpha)
-        lookup_treshold = read_dream_mean_std[0] + read_z * read_dream_mean_std[1]
-
-    
         imagined_prior = imagined_prior.view(1, -1, stoch_state_size)   ## after: -> [1, 1024, 1024]
+        if episodic_memory is not None:
+            read_dream_mean_std[0] = torch.mean(uncertainties) * cfg.episodic_memory.read_exp_mov_avg_alpha + read_dream_mean_std[0] * (1 - cfg.episodic_memory.read_exp_mov_avg_alpha)           
+            read_dream_mean_std[1] = torch.std(uncertainties) * cfg.episodic_memory.read_exp_mov_avg_alpha + read_dream_mean_std[1] * (1 - cfg.episodic_memory.read_exp_mov_avg_alpha)
+            lookup_treshold = read_dream_mean_std[0] + read_z * read_dream_mean_std[1]
 
+            if cfg.episodic_memory.use_acd:
+                k: int = cfg.episodic_memory.k_neighbors
 
-        if cfg.episodic_memory.use_acd:
-            k: int = cfg.episodic_memory.k_neighbors
+                uncertainty_mask = uncertainties > lookup_treshold          ## shape [1024]
 
-            uncertainty_mask = uncertainties > lookup_treshold          ## shape [1024]
+                ## ACDs: [num_uncertainties>_threashold, 1, 1024]
+                ACDs: torch.tensor = parallel_additive_correction_delta(recurrent_state[:, uncertainty_mask, :], 
+                                                                    imagined_prior[:, uncertainty_mask, :], 
+                                                                    actions[:, uncertainty_mask, :], 
+                                                                    episodic_memory, 
+                                                                    world_model, 
+                                                                    k, 
+                                                                    device=device,
+                                                                    cfg=cfg)
 
-            ## ACDs: [num_uncertainties>_threashold, 1, 1024]
-            ACDs: torch.tensor = parallel_additive_correction_delta(recurrent_state[:, uncertainty_mask, :], 
-                                                                imagined_prior[:, uncertainty_mask, :], 
-                                                                actions[:, uncertainty_mask, :], 
-                                                                episodic_memory, 
-                                                                world_model, 
-                                                                k, 
-                                                                device=device)
-
-            imagined_prior[:, uncertainty_mask, :] += ACDs
+                imagined_prior[:, uncertainty_mask, :] += ACDs
         imagined_latent_state = torch.cat((imagined_prior, recurrent_state), -1)
         imagined_trajectories[i] = imagined_latent_state
         actions = torch.cat(actor(imagined_latent_state.detach())[0], dim=-1)
@@ -737,19 +736,23 @@ def main(fabric: Fabric, cfg: Dict[str, Any]):
         save_configs(cfg, log_dir)
 
     ################# init EM here #################
-    episodic_memory: EM = EM(
-        trajectory_length=cfg.episodic_memory.trajectory_length,
-        uncertainty_threshold=cfg.episodic_memory.uncertainty_threshold,
-        max_elements=cfg.episodic_memory.capacity,
-        config=cfg,
-        k_nn=cfg.episodic_memory.k_neighbors,
-        prune_fraction =cfg.episodic_memory.prune_fraction,
-        time_to_live = cfg.episodic_memory.time_to_live,
-        z_size=cfg.algo.world_model.discrete_size*cfg.algo.world_model.stochastic_size,
-        h_size=cfg.algo.world_model.recurrent_model.recurrent_state_size,
-        a_size=actions_dim[0], # TODO not sure if shape is correct,
-        fabric=fabric
-    )
+    if cfg.episodic_memory.use_episodic_memory:
+        episodic_memory: EM = EM(
+            trajectory_length=cfg.episodic_memory.trajectory_length,
+            uncertainty_threshold=cfg.episodic_memory.uncertainty_threshold,
+            max_elements=cfg.episodic_memory.capacity,
+            config=cfg,
+            k_nn=cfg.episodic_memory.k_neighbors,
+            prune_fraction =cfg.episodic_memory.prune_fraction,
+            time_to_live = cfg.episodic_memory.time_to_live,
+            z_size=cfg.algo.world_model.discrete_size*cfg.algo.world_model.stochastic_size,
+            h_size=cfg.algo.world_model.recurrent_model.recurrent_state_size,
+            a_size=actions_dim[0], # TODO not sure if shape is correct,
+            fabric=fabric
+        )
+    else:
+        # warning that no EM currently used
+        warnings.warn("\n!!!!!!!!!! NO EM CURRENTLY USED !!!!!!!!!!\n")
 
     # Metrics
     aggregator = None
@@ -847,18 +850,20 @@ def main(fabric: Fabric, cfg: Dict[str, Any]):
     last_n_uncertainty_mean = 0.0
     last_n_uncertainty_std  = 0.0
 
-    print(f"Fill buffer at max ~{learning_starts} times and then train")
+    if cfg.episodic_memory.use_episodic_memory:
+        print(f"Fill buffer at max ~{learning_starts} times and then train")
     for iter_num in tqdm(range(start_iter, total_iters + 1)):
         policy_step += policy_steps_per_iter
         # print(f"=== Iteration {iter_num} / {total_iters}, Policy Step: {policy_step} ===")
 
         ### adjust EM read and write std mulittipliers
-        if write_z < cfg.episodic_memory.write_std_multiplier_max and \
-          policy_step >= cfg.episodic_memory.write_std_inc_start_at_ep:
-            write_z = min(cfg.episodic_memory.write_std_multiplier_max, write_z + cfg.episodic_memory.write_std_inc_addend)
-        if read_z < cfg.episodic_memory.read_std_multiplier_max and \
-          policy_step >= cfg.episodic_memory.read_std_inc_start_at_ep:
-            read_z = min(cfg.episodic_memory.read_std_multiplier_max, read_z + cfg.episodic_memory.read_std_inc_addend)
+        if cfg.episodic_memory.use_episodic_memory:
+            if write_z < cfg.episodic_memory.write_std_multiplier_max and \
+            policy_step >= cfg.episodic_memory.write_std_inc_start_at_ep:
+                write_z = min(cfg.episodic_memory.write_std_multiplier_max, write_z + cfg.episodic_memory.write_std_inc_addend)
+            if read_z < cfg.episodic_memory.read_std_multiplier_max and \
+            policy_step >= cfg.episodic_memory.read_std_inc_start_at_ep:
+                read_z = min(cfg.episodic_memory.read_std_multiplier_max, read_z + cfg.episodic_memory.read_std_inc_addend)
 
     ### handle environment interaction and replay_buffer filling
     ###-----------------------------------
@@ -885,7 +890,7 @@ def main(fabric: Fabric, cfg: Dict[str, Any]):
                     h, z_logits, uncertainty = None, None, 0.0
 
                     ## add all samples into EM with high uncertainty to ensure they are stored (they are updated anyways later)
-                    if cfg.episodic_memory.fill_parallel_to_buffer:
+                    if cfg.episodic_memory.use_episodic_memory and cfg.episodic_memory.fill_parallel_to_buffer:
                         torch_obs = prepare_obs(fabric, obs, cnn_keys=cfg.algo.cnn_keys.encoder, num_envs=cfg.env.num_envs)
                         mask = {k: v for k, v in torch_obs.items() if k.startswith("mask")}
                         if len(mask) == 0:
@@ -922,7 +927,7 @@ def main(fabric: Fabric, cfg: Dict[str, Any]):
                         )
                     
                 ### update ems uncertainty treshold
-                if (z_logits is not None) and (iter_num > learning_starts):
+                if cfg.episodic_memory.use_episodic_memory and (z_logits is not None) and (iter_num > learning_starts):
                     last_N_env_uncertainties[iter_num % last_N_env_uncertainties.shape[0]] = uncertainty    ## here add single value
                     last_n_uncertainty_mean = np.mean(last_N_env_uncertainties)
                     last_n_uncertainty_std = np.std(last_N_env_uncertainties)
@@ -973,13 +978,14 @@ def main(fabric: Fabric, cfg: Dict[str, Any]):
                 ## Update Episodic Memory
                 # uncertainty = np.array([0.8])
                 # if cfg.episodic_memory.enable_rehersal_training:
-                episodic_memory.step(
-                    h=h,
-                    z=z_logits,
-                    a=actions,
-                    uncertainty=uncertainty,
-                    done=dones
-                )
+                if cfg.episodic_memory.use_episodic_memory:
+                    episodic_memory.step(
+                        h=h,
+                        z=z_logits,
+                        a=actions,
+                        uncertainty=uncertainty,
+                        done=dones
+                    )
 
             step_data["is_first"] = np.zeros_like(step_data["terminated"])
             if "restart_on_exception" in infos:
@@ -1091,7 +1097,7 @@ def main(fabric: Fabric, cfg: Dict[str, Any]):
                             is_continuous,
                             actions_dim,
                             moments,
-                            episodic_memory, 
+                            episodic_memory if cfg.episodic_memory.use_episodic_memory else None, 
                             read_dream_mean_std, 
                             read_z
                         )
@@ -1099,7 +1105,7 @@ def main(fabric: Fabric, cfg: Dict[str, Any]):
                     train_step += world_size
             # end_time = time.time()
             # print(f"training per_rank_gradient_steps:{per_rank_gradient_steps}, seq_len: {cfg.algo.per_rank_sequence_length} times took {(end_time - start_time)/1000} seconds ")
-            if cfg.episodic_memory.enable_rehersal_training and iter_num % cfg.episodic_memory.rehersal_train_every == 0:
+            if cfg.episodic_memory.use_episodic_memory and cfg.episodic_memory.enable_rehersal_training and iter_num % cfg.episodic_memory.rehersal_train_every == 0:
                 rehearsal_train(
                     fabric          = fabric,
                     world_model     = world_model,
@@ -1126,17 +1132,18 @@ def main(fabric: Fabric, cfg: Dict[str, Any]):
             )
 
             # Log EM info
-            fabric.log("EM/size", len(episodic_memory), policy_step)
+            if cfg.episodic_memory.use_episodic_memory: fabric.log("EM/size", len(episodic_memory), policy_step)
             fabric.log("EM/write_z", write_z, policy_step)
             fabric.log("EM/read_z", read_z, policy_step)
             fabric.log("EM/Write_Treshold", (last_n_uncertainty_mean + write_z * last_n_uncertainty_std), policy_step)
             fabric.log("EM/Read_Treshold", (read_dream_mean_std[0].cpu().numpy() + read_z * read_dream_mean_std[1].cpu().numpy()), policy_step) # dont know if correct
             fabric.log("EM/Env_Uncertainty", last_n_uncertainty_mean, policy_step)
             fabric.log("EM/Img_Uncertainty", read_dream_mean_std[0].cpu().numpy(), policy_step) # dont know if correct
-            fabric.log("EM/EM_Age_Mean", (torch.mean((episodic_memory.birth_time[:len(episodic_memory)] - episodic_memory.step_counter).type(torch.float32)).cpu().numpy()) * -1, policy_step)
-            fabric.log("EM/EM_Age_Std", torch.std((episodic_memory.birth_time[:len(episodic_memory)] - episodic_memory.step_counter).type(torch.float32)).cpu().numpy(), policy_step)
-            fabric.log("EM/EM_Uncertainty_Mean", torch.mean(episodic_memory.uncertainty[:len(episodic_memory)]).cpu().numpy(), policy_step)
-            fabric.log("EM/EM_Uncertainty_Std", torch.std(episodic_memory.uncertainty[:len(episodic_memory)]).cpu().numpy(), policy_step)
+            if cfg.episodic_memory.use_episodic_memory: 
+                fabric.log("EM/EM_Age_Mean", (torch.mean((episodic_memory.birth_time[:len(episodic_memory)] - episodic_memory.step_counter).type(torch.float32)).cpu().numpy()) * -1, policy_step)
+                fabric.log("EM/EM_Age_Std", torch.std((episodic_memory.birth_time[:len(episodic_memory)] - episodic_memory.step_counter).type(torch.float32)).cpu().numpy(), policy_step)
+                fabric.log("EM/EM_Uncertainty_Mean", torch.mean(episodic_memory.uncertainty[:len(episodic_memory)]).cpu().numpy(), policy_step)
+                fabric.log("EM/EM_Uncertainty_Std", torch.std(episodic_memory.uncertainty[:len(episodic_memory)]).cpu().numpy(), policy_step)
             # Sync distributed timers
             if not timer.disabled:
                 timer_metrics = timer.compute()
