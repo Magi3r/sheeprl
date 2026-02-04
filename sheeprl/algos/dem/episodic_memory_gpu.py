@@ -74,7 +74,7 @@ class GPUEpisodicMemory():
         self.next_z : torch.Tensor     = torch.empty((self.max_elements, self.z_size), dtype=torch.float32, device = self.device)
         
         self.current_trajectory: TrajectoryObject | None = None
-        self.num_trajectories: int = 0  ## number of trajectories currently stored (and so also idx of last empty elem)
+        self.num_trajectories: int = 0  ## number of trajectories currently stored (and so also idx of first empty elem)
 
         self.prev_state: torch.Tensor = torch.empty(self.key_size, device = self.device)
 
@@ -85,7 +85,7 @@ class GPUEpisodicMemory():
 
         self.kNN_rebuild_needed: bool = True            ## if NearestNeighbors object needs to be rebuild (due to change in keys)
         self.kNN_obj: NearestNeighbors | None = None    ## NearestNeighbors object (scikit-learn oder so)
-        self.key_array: list = []                       ## list containing all keys (this bytes shit)
+        self.key_array: list = []                       ## list containing all keys (this bytes shit) 
 
         self.prev_state_stored = False    ## used in step function to keep track of newly started episode
 
@@ -100,6 +100,7 @@ class GPUEpisodicMemory():
     def __len__(self):
         return self.num_trajectories
 
+    ##### ssshhoouuullddd be correct? 
     def __create_traj(self, h: torch.Tensor, z: torch.Tensor, a: torch.Tensor, uncertainty: float):
         """ Create new empty trajectory, that is accessible by a key.
         """
@@ -128,7 +129,6 @@ class GPUEpisodicMemory():
                 self.trajectories_tensor_knn[self.num_trajectories, self.h_size:self.h_size+self.z_size] = torch.nn.functional.normalize(self.trajectories_tensor_knn[self.num_trajectories, self.h_size:self.h_size+self.z_size], p=2, dim=-1)
                 self.trajectories_tensor[self.num_trajectories, :self.h_size] = torch.nn.functional.normalize(self.trajectories_tensor[self.num_trajectories, :self.h_size], p=2, dim=-1)
 
-
             self.traj_obj[self.num_trajectories] = trajectory
             self.idx[self.num_trajectories] = trajectory.new_traj()
             self.uncertainty[self.num_trajectories] = uncertainty
@@ -136,6 +136,7 @@ class GPUEpisodicMemory():
 
             self.num_trajectories += 1
         
+    ##### ssshhoouuullddd be correct? 
     def __fill_traj(self, z: torch.Tensor, a: torch.Tensor) -> None:
         """ Adds a new transition (z, a) to the current trajectory. If the trajectory becomes full, it clears current_trajectory."""
         # value: (z_{t'}, a_{t'}) -> torch.Size([1, 1, 1024]), float (?)
@@ -144,7 +145,7 @@ class GPUEpisodicMemory():
         if self.current_trajectory.add(z, a) == 0:
             self.current_trajectory = None
 
-
+    ##### ssshhoouuullddd be correct? 
     def remove_traj(self, index: int) -> None:
         assert(index < self.num_trajectories)
 
@@ -163,6 +164,7 @@ class GPUEpisodicMemory():
 
         self.num_trajectories -= 1
     
+    ## TODO: check is this is currect with imagined_prior, recurrent_state
     def step(self, h: torch.Tensor, z: torch.Tensor, a: torch.Tensor, uncertainty: float, done:bool=False) -> None:
         """ 
         Step through the memory with new transition.
@@ -178,7 +180,7 @@ class GPUEpisodicMemory():
         Args:
             h (torch.Tensor): The recurrent state.
             z (torch.Tensor): The stochastic state.
-            a (torch.Tensor): The action taken.
+            a (torch.Tensor): The action taken based on this (h, z). ~TODO: so ist das gearde zumindest
             uncertainty (float): The uncertainty of the current state.
             done (bool, optional): Whether the episode is done. Defaults to False.
         """

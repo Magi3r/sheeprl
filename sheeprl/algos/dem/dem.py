@@ -282,7 +282,7 @@ def train(
         ## TODO: Assumption: currently these values get detached before loss backward, so no WorldModel is trained here 
         ##   (so we could combine both _transition calls in imagination for faster inference (one call for actual value, one only for uncertainties))
 
-
+        ## TODO: check is this is currect with imagined_prior, recurrent_state
         imagined_prior, recurrent_state, uncertainties = world_model.rssm.imagination(imagined_prior, recurrent_state, actions, return_uncertainty = True)
 
         ### update treshold based on rolling mean and std ~0.145592ms
@@ -1132,14 +1132,14 @@ def main(fabric: Fabric, cfg: Dict[str, Any]):
             )
 
             # Log EM info
-            if cfg.episodic_memory.use_episodic_memory: fabric.log("EM/size", len(episodic_memory), policy_step)
-            fabric.log("EM/write_z", write_z, policy_step)
-            fabric.log("EM/read_z", read_z, policy_step)
-            fabric.log("EM/Write_Treshold", (last_n_uncertainty_mean + write_z * last_n_uncertainty_std), policy_step)
-            fabric.log("EM/Read_Treshold", (read_dream_mean_std[0].cpu().numpy() + read_z * read_dream_mean_std[1].cpu().numpy()), policy_step) # dont know if correct
-            fabric.log("EM/Env_Uncertainty", last_n_uncertainty_mean, policy_step)
-            fabric.log("EM/Img_Uncertainty", read_dream_mean_std[0].cpu().numpy(), policy_step) # dont know if correct
             if cfg.episodic_memory.use_episodic_memory: 
+                fabric.log("EM/size", len(episodic_memory), policy_step)
+                fabric.log("EM/write_z", write_z, policy_step)
+                fabric.log("EM/read_z", read_z, policy_step)
+                fabric.log("EM/Write_Treshold", (last_n_uncertainty_mean + write_z * last_n_uncertainty_std), policy_step)
+                fabric.log("EM/Read_Treshold", (read_dream_mean_std[0].cpu().numpy() + read_z * read_dream_mean_std[1].cpu().numpy()), policy_step) # dont know if correct
+                fabric.log("EM/Env_Uncertainty", last_n_uncertainty_mean, policy_step)
+                fabric.log("EM/Img_Uncertainty", read_dream_mean_std[0].cpu().numpy(), policy_step) # dont know if correct
                 fabric.log("EM/EM_Age_Mean", (torch.mean((episodic_memory.birth_time[:len(episodic_memory)] - episodic_memory.step_counter).type(torch.float32)).cpu().numpy()) * -1, policy_step)
                 fabric.log("EM/EM_Age_Std", torch.std((episodic_memory.birth_time[:len(episodic_memory)] - episodic_memory.step_counter).type(torch.float32)).cpu().numpy(), policy_step)
                 fabric.log("EM/EM_Uncertainty_Mean", torch.mean(episodic_memory.uncertainty[:len(episodic_memory)]).cpu().numpy(), policy_step)
