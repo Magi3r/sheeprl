@@ -236,7 +236,7 @@ class GPUEpisodicMemory():
         # sample = mem.get_trajectory(offset)
         # return sample
 
-    def get_samples(self, skip_non_full_traj: bool = True) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    def get_samples(self, skip_non_full_traj: bool = True) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         """
         Return all stored trajectories in batched form for training.
 
@@ -292,7 +292,7 @@ class GPUEpisodicMemory():
             
         # [h1, h2, ...] [zs, ...] [as, ...]
         # batch example: [h1, h2, h3]  [zs1, zs2, zs3] [as1, as2, as3]   ####### shape(sequenz, batch, 1024)
-        if full_trajes == 0: return (None, None, None)
+        if full_trajes == 0: return (None, None, None, None)
         # split empty traj parts away (from end)
         initial_h   = initial_h[:, :full_trajes]
         z_all       = z_all[:, :full_trajes]
@@ -339,6 +339,7 @@ class GPUEpisodicMemory():
                 query (torch.Tensor): A batch of queries.
             Returns:
                 indices (torch.Tensor): indices of the k nearest neighbors for each query.
+                scores (torch.Tensor): similarity scores of the k nearest neighbors for each query.
         """
         with torch.no_grad():
             metric: str = "cosine" # "cosine" | "ip"
@@ -351,9 +352,9 @@ class GPUEpisodicMemory():
                 query[:, :self.h_size]                        = torch.nn.functional.normalize(query[:, :self.h_size], p=2, dim=-1)
                 
             search_space: torch.Tensor = self.trajectories_tensor_knn[:self.num_trajectories]   ## trajectories_tensor = torch.empty((self.max_elements, self.key_size), device = self.device)
-            indices, _scores = exact_search(query, search_space, k, metric=metric) ## , device=self.device
+            indices, scores = exact_search(query, search_space, k, metric=metric) ## , device=self.device
 
-            return indices
+            return indices, scores
 
     def solution(self, file_path="./sheeprl/algos/dem/solution.txt"):
         try:
