@@ -67,7 +67,7 @@ class GPUEpisodicMemory():
         self.trajectories_tensor: torch.Tensor = torch.empty((self.max_elements, self.key_size), device = self.device)
         self.trajectories_tensor_knn: torch.Tensor = torch.empty((self.max_elements, self.key_size), device = self.device)
         ### on CPU an np because only references to Objects in RAM  (but traj data inside TrajObj on GPU)
-        self.traj_obj: np.array        = np.empty(self.max_elements, dtype=object)            ## object refferences
+        self.traj_obj: np.ndarray        = np.empty(self.max_elements, dtype=object)            ## object refferences
         self.idx: torch.Tensor         = torch.empty(self.max_elements, dtype=torch.int64, device = self.device)
         self.uncertainty: torch.Tensor = torch.empty(self.max_elements, dtype=torch.float32, device = self.device)
         self.birth_time: torch.Tensor  = torch.empty(self.max_elements, dtype=torch.int64, device = self.device)
@@ -232,18 +232,13 @@ class GPUEpisodicMemory():
     def __str__(self):
         return f"EM| Num trajectories: {self.num_trajectories}| Trajectory length: {self.trajectory_length}| Uncertainty thr.: {self.uncertainty_threshold}| Current trajectory: {self.current_trajectory}"
 
-    def __getitem__(self, idx):
-        Exception("Not implemented yet.")
-        # mem, offset, _ = self.trajectories[key]
-        # sample = mem.get_trajectory(offset)
-        # return sample
-
-    def get_samples(self, skip_non_full_traj: bool = True) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    ##### ssshhoouuullddd be correct? 
+    def get_samples(self, skip_non_full_traj: bool = True) -> tuple[torch.Tensor|None, torch.Tensor|None, torch.Tensor|None, torch.Tensor|None]:
         """
         Return all stored trajectories in batched form for training.
 
         Collects initial recurrent states (h), latent state sequences (z), and action
-        sequences (a) from all stored trajectories and stacks them into NumPy arrays.
+        sequences (a) from all stored trajectories and stacks them into torch tensors (so key + traj values).
 
         Args:
             skip_non_full_traj (bool): Decides whether incomplete trajectories are also returned.
@@ -268,8 +263,8 @@ class GPUEpisodicMemory():
         # for i, (key, val) in enumerate(self.trajectories.items()):  # val: (TrajectoryMemory, idx, uncertainty, time of birth)
             # value
             traj_obj: TrajectoryObject = self.traj_obj[i]
-            traj_nr: int = self.idx[i]
-            trajectory: torch.Tensor = traj_obj.get_trajectory(traj_nr)
+            traj_nr = self.idx[i] ## torch.int64
+            trajectory: torch.Tensor = traj_obj.get_trajectory(traj_nr)     ## (traj_len, z+a_size)
 
             # print(f"trajectory.shape[0]::{trajectory.shape[0]}      - traj_nr: {traj_nr}")
             if skip_non_full_traj and (trajectory.shape[0] != self.trajectory_length): continue
@@ -277,20 +272,18 @@ class GPUEpisodicMemory():
             returned_trajs_indices[full_trajes] = i
             full_trajes +=1
 
-            z_s = trajectory[:,:-self.a_size].detach().clone()   # ! are logits # shape (length, 1024)
-            a_s = trajectory[:,-self.a_size:].detach().clone()    # shape(length, 
+            z_s: torch.Tensor = trajectory[:,:-self.a_size].detach().clone()   # ! are logits # shape (length, 1024)
+            a_s: torch.Tensor = trajectory[:,-self.a_size:].detach().clone()    # shape(length, 
 
             #  (h, z, a)
-            z_all[0, i] = self.trajectories_tensor[i, self.h_size:-self.a_size]
-            a_all[0, i] = self.trajectories_tensor[i, -self.a_size:]
+            z_all[0, i]     = self.trajectories_tensor[i, self.h_size:-self.a_size]
+            a_all[0, i]     = self.trajectories_tensor[i, -self.a_size:]
+            initial_h[0, i] = self.trajectories_tensor[i, :self.h_size]
             # z_all[0, i] = np.frombuffer(key[1], dtype=np.float32)  # from shape (512,) into shape (1024,)
             # a_all[0, i] = np.frombuffer(key[2], dtype=np.float32) 
             z_all[1:(z_s.shape[0]+1), i] = z_s
             a_all[1:(z_s.shape[0]+1), i] = a_s
-            initial_h[0, i] = self.trajectories_tensor[i, :self.h_size]
             # initial_h[0, i] = np.frombuffer(key[0], dtype=np.float32)#.reshape(4096)
-
-            
             
         # [h1, h2, ...] [zs, ...] [as, ...]
         # batch example: [h1, h2, h3]  [zs1, zs2, zs3] [as1, as2, as3]   ####### shape(sequenz, batch, 1024)
@@ -335,7 +328,7 @@ class GPUEpisodicMemory():
 
         self.num_trajectories -= to_prune_number
         
-    def kNN_gpu(self, query: torch.Tensor, k: int) -> torch.Tensor:
+    def kNN_gpu(self, query: torch.Tensor, k: int) -> tuple[torch.Tensor, torch.Tensor]:
         """Return the k-NearestNeighbors (keys + trajectories) among stored trajectory keys.
             Args:
                 query (torch.Tensor): A batch of queries.

@@ -464,12 +464,10 @@ def rehearsal_train(fabric:             Fabric,
     stochastic_size = cfg.algo.world_model.stochastic_size
     discrete_size = cfg.algo.world_model.discrete_size
     device = fabric.device
-    # start_time = time.time()
+    ### all_posteriors_logits: (trajectory_length + 1, num_trajectories, 1024)
     all_recurrents_states, all_posteriors_logits, all_actions, all_traj_indices = episodic_memory.get_samples()
-    # end_time = time.time()
     # if False:
         # episodic_memory._prune_memory(10)
-    # print(f"Get_Samples: {(end_time - start_time)/1000} seconds")
 
     if all_recurrents_states is None: return
     # print("get_samples types: ", all_recurrents_states.dtype, all_posteriors_logits.dtype, all_actions.dtype)
@@ -479,6 +477,8 @@ def rehearsal_train(fabric:             Fabric,
     # recurrent_state = torch.zeros(1, batch_size, recurrent_state_size, device=device)
     # recurrent_states = torch.empty(traj_length, batch_size, recurrent_state_size, device=device)
     priors_logits = torch.empty(traj_length + 1, batch_size, stoch_state_size, device=device)
+
+    ## iterating over each batch of trajectories
     for i in range(0, all_recurrents_states.shape[1], batch_size):
         # print("rehearsal train BATCH_INDEX: ", i)
         priors_logits = priors_logits.view(traj_length + 1, batch_size, stoch_state_size)
