@@ -278,12 +278,17 @@ def train(
     # print("Their Total imagination loop duration          :", (time.perf_counter_ns()- start_time_loop)/1000_000, "ms") ### ~ 50ms
     # torch.cuda.synchronize()
     # start_time_loop = time.perf_counter_ns()
+    prev_imagined_prior = torch.empty_like(imagined_prior, device=device)
+    prev_recurrent_state = torch.empty_like(recurrent_state, device=device)
     for i in range(1, cfg.algo.horizon + 1):    ## lopin 15 times
         ## TODO: Assumption: currently these values get detached before loss backward, so no WorldModel is trained here 
         ##   (so we could combine both _transition calls in imagination for faster inference (one call for actual value, one only for uncertainties))
 
         ## TODO: check is this is currect with imagined_prior, recurrent_state
+        prev_imagined_prior.copy_(imagined_prior)
+        prev_recurrent_state.copy_(recurrent_state)
         imagined_prior, recurrent_state, uncertainties = world_model.rssm.imagination(imagined_prior, recurrent_state, actions, return_uncertainty = True)
+        # assert(not torch.equal(prev_imagined_prior, imagined_prior))
 
         ### update treshold based on rolling mean and std ~0.145592ms
         imagined_prior = imagined_prior.view(1, -1, stoch_state_size)   ## after: -> [1, 1024, 1024]
@@ -298,8 +303,9 @@ def train(
                 uncertainty_mask = uncertainties > lookup_treshold          ## shape [1024]
 
                 ## ACDs: [num_uncertainties>_threashold, 1, 1024]
-                ACDs: torch.tensor = parallel_additive_correction_delta(recurrent_state[:, uncertainty_mask, :], 
-                                                                    imagined_prior[:, uncertainty_mask, :], 
+                ## TODO: AKTUELL: query = (h_t+1, z_t+1, a_t)
+                ACDs: torch.tensor = parallel_additive_correction_delta(prev_recurrent_state[:, uncertainty_mask, :], 
+                                                                    prev_imagined_prior[:, uncertainty_mask, :], 
                                                                     actions[:, uncertainty_mask, :], 
                                                                     episodic_memory, 
                                                                     world_model, 
@@ -437,6 +443,7 @@ def train(
     critic_optimizer.zero_grad(set_to_none=True)
     world_optimizer.zero_grad(set_to_none=True)
 
+##### ssshhoouuullddd be correct? ~except maybe the no grad stuff, idk, because we only want to train Dynamics predictor imagination ~Josch
 def rehearsal_train(fabric:             Fabric,
                     world_model:        WorldModel,
                     world_optimizer:    Optimizer,
@@ -464,54 +471,56 @@ def rehearsal_train(fabric:             Fabric,
     stochastic_size = cfg.algo.world_model.stochastic_size
     discrete_size = cfg.algo.world_model.discrete_size
     device = fabric.device
-    ### all_posteriors_logits: (trajectory_length + 1, num_trajectories, 1024)
-    all_recurrents_states, all_posteriors_logits, all_actions, all_traj_indices = episodic_memory.get_samples()
-    # if False:
-        # episodic_memory._prune_memory(10)
 
-    if all_recurrents_states is None: return
-    # print("get_samples types: ", all_recurrents_states.dtype, all_posteriors_logits.dtype, all_actions.dtype)
+    # all_recurrents_states:    (1?, num_trajectories, 4096).
+    # all_posteriors_logits:    (trajectory_length + 1, num_trajectories, 1024).
+    # all_actions:              (trajectory_length + 1, num_trajectories, 1).
+    # all_traj_indices: Indices of trajectories actually returned
+    all_recurrents_states, all_posteriors_logits, all_actions, all_traj_indices = episodic_memory.get_samples()
+
+    if (all_recurrents_states is None) or (all_posteriors_logits is None) or (all_actions is None) or (all_traj_indices is None): return
+
     # print("get_samples shape: ", all_recurrents_states.shape, all_posteriors_logits.shape, all_actions.shape) # (1,2,4096)(...)
-    batch_size = min(batch_size, all_recurrents_states.shape[1])
+    # => get_samples shape:  torch.Size([1, 804, 4096]) torch.Size([21, 804, 1024]) torch.Size([21, 804, 18])
+
+    num_trajectories: int = all_recurrents_states.shape[1]
+    batch_size = min(batch_size, num_trajectories)
     stoch_state_size = stochastic_size * discrete_size  ## e.g. 32x32
-    # recurrent_state = torch.zeros(1, batch_size, recurrent_state_size, device=device)
-    # recurrent_states = torch.empty(traj_length, batch_size, recurrent_state_size, device=device)
-    priors_logits = torch.empty(traj_length + 1, batch_size, stoch_state_size, device=device)
+
+    priors_logits = torch.empty(traj_length + 1, batch_size, stoch_state_size, device=device)   ## +1 always since key value is included
+    # print("initial priors_logits shape:", priors_logits.shape)
 
     ## iterating over each batch of trajectories
-    for i in range(0, all_recurrents_states.shape[1], batch_size):
-        # print("rehearsal train BATCH_INDEX: ", i)
+    for i in range(0, num_trajectories, batch_size):
         priors_logits = priors_logits.view(traj_length + 1, batch_size, stoch_state_size)
-        # posteriors_logits = posteriors_logits.view(*posteriors_logits.shape[:-2], stoch_state_size)
 
-        j = min(batch_size, max(all_recurrents_states.shape[1]-i, 0)) ### (only relevant for last batch (i mean the calculation))
+        j = min(batch_size, max(num_trajectories-i, 0)) ### (only relevant for last batch (I mean the calculation))
         if j==0: continue
 
-        recurrent_state = all_recurrents_states[:, i:i+j]
-        posteriors_logits = all_posteriors_logits[:, i:i+j]
-        actions = all_actions[:, i:i+j]
+        ## create batched trajectories
+        recurrent_state     = all_recurrents_states[:, i:i+j]
+        posteriors_logits   = all_posteriors_logits[:, i:i+j]
+        actions             = all_actions[:, i:i+j]
 
         posteriors = compute_stochastic_state(posteriors_logits) ## torch.empty(traj_length, batch_size, stochastic_size, discrete_size, device=device)
-        posteriors = posteriors.view(*posteriors.shape[:-2], -1)
-        priors_logits[0, : j], _ = world_model.rssm._transition(recurrent_state)
+        posteriors = posteriors.view(*posteriors.shape[:-2], -1) ## => (traj_length, batch_size, stochastic_size * discrete_size)
+        
+        ## setting first z based on initial h
+        priors_logits[0, : j], _ = world_model.rssm._transition(recurrent_state)    ## _transition returns: (logits, priors)
+        # print("priors_logits shape:", priors_logits.shape, " j:", j)
 
-        # print("posteriors_logits shape:", posteriors_logits.shape)
+        ## doing imagination based on initial state
         for k in range(0, traj_length):
             ## ^z, h
 
-            # print("posteriors[k] shape:", posteriors[k].shape)
-            # print("recurrent_state shape:", recurrent_state.shape)
-            # print("actions[k] shape:", actions[k].shape)
             #### THEIR SHAPES: imagined_prior shape: torch.Size([1, 1024, 1024]); recurrent_state shape: torch.Size([1, 1024, 4096]); actions shape: torch.Size([1, 1024, 6])
             if k == 0:
                 imagined_prior_logits, recurrent_state, uncertainties = world_model.rssm.imagination(posteriors[k:k+1], recurrent_state, actions[k:k+1], return_logits=True, return_uncertainty=True) ## compute_stochastic_state -> from prior logits to prior
-                ## updating uncertainties in EM
-                episodic_memory.uncertainty[all_traj_indices[i:i+j]] = uncertainties    ## Updating uncertainties
+                episodic_memory.uncertainty[all_traj_indices[i:i+j]] = uncertainties    ## Updating uncertainties in EM
             else:
                 imagined_prior_logits, recurrent_state = world_model.rssm.imagination(posteriors[k:k+1], recurrent_state, actions[k:k+1], return_logits=True, return_uncertainty=False) ## compute_stochastic_state -> from prior logits to prior
 
             imagined_prior_logits = imagined_prior_logits.view(1, -1, stoch_state_size)
-            # recurrent_states[i] = recurrent_state
             priors_logits[k + 1, : j] = imagined_prior_logits
 
         # Reshape posterior and prior logits to shape [B, T, 32, 32]

@@ -529,7 +529,9 @@ class RSSM(nn.Module):
         #     # print(f"No uncertain imagination time (ns):     {(time.perf_counter_ns()- start_time)/1000_000}ms")
         #     return (imagined_prior_logits if return_logits else imagined_prior), recurrent_state
             # start_time = time.perf_counter_ns()
+        ## h_{t+1} = Sequence_Model(h_t, z_t, a_t)
         recurrent_state = self.recurrent_model(torch.cat((prior, actions), -1), recurrent_state)
+        ## z_{t+1} =  Dynamics_Predictor(h_{t+1})
         imagined_prior_logits, imagined_prior = self._transition(recurrent_state)
         # print(f"Imagination step time (ns): {(time.perf_counter_ns()- start_time)/1000_000}ms")
         # print("recurrent_state shape: ", recurrent_state.shape)           
@@ -732,7 +734,7 @@ class PlayerDV3(nn.Module):
             (optional) The recurrent state and the stochastic state logits.
         """
         embedded_obs = self.encoder(obs)    ## (first part from Encoder of the paper)
-        ### h
+        ## h_t = Sequence-model(h_{t-1}, z_{t-1}, a_{t-1})
         self.recurrent_state = self.rssm.recurrent_model(
             torch.cat((self.stochastic_state, self.actions), -1), self.recurrent_state
         )
@@ -740,30 +742,25 @@ class PlayerDV3(nn.Module):
             _, self.stochastic_state = self.rssm._representation(embedded_obs)
             raise NotImplementedError("DecoupledRSSM + DreamerV3 Actor not implemented yet.")
         else:
-            ### no grad so no gradients for transision model (dont need it, dont want to trian it)
+            ### no grad so no gradients for transision model (dont need it, dont want to train it)
             with torch.no_grad():
                 self.rssm.transition_model.enable_mc_dropout()
                 
                 prior_logits_flat, _ = self.rssm._transition(self.recurrent_state)
-                # print("prior_logits_flat shape:", prior_logits_flat.shape)   # Shape: torch.Size([5, 1, 4096])
-                std = prior_logits_flat.std(dim=0)         # (B, T, D)
-                uncertainty = std.mean(dim=-1)           # (B, T)
-                # print("uncertainty shape:", uncertainty.shape)   # Shape: torch.Size([1, 5])
-                # print("self.recurrent_state:", self.recurrent_state.shape)
-                # print(prior_logits_flat.shape)
-                
-                # print(f"Mean: {mean}\nStd: {std}")
-                    # Shape Mean: torch.Size([1, 4096])
-                    # Shape Std: torch.Size([1, 4096])
-                    # Logits Shape:torch.Size([5, 1, 4096])
+                std = prior_logits_flat.std(dim=0)  # (B, T, D)
+                uncertainty = std.mean(dim=-1)      # (B, T)
+                # Shape Mean: torch.Size([1, 4096])
+                # Shape Std: torch.Size([1, 4096])
+                # Logits Shape:torch.Size([5, 1, 4096])
 
                 self.rssm.transition_model.disable_mc_dropout()
 
-            ### z            
+        ## z_t = Encoder(h_t, x_t)            
         self.z_logits, self.stochastic_state = self.rssm._representation(self.recurrent_state, embedded_obs)    ## z (second part from Encoder of the paper)
         self.stochastic_state = self.stochastic_state.view(
             *self.stochastic_state.shape[:-2], self.stochastic_size * self.discrete_size
         )
+        ## a_t = Actor(h_t, z_t)
         actions, _ = self.actor(torch.cat((self.stochastic_state, self.recurrent_state), -1), greedy, mask)
         self.actions = torch.cat(actions, -1)
 

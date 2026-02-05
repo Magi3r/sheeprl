@@ -71,6 +71,7 @@ class GPUEpisodicMemory():
         self.idx: torch.Tensor         = torch.empty(self.max_elements, dtype=torch.int64, device = self.device)
         self.uncertainty: torch.Tensor = torch.empty(self.max_elements, dtype=torch.float32, device = self.device)
         self.birth_time: torch.Tensor  = torch.empty(self.max_elements, dtype=torch.int64, device = self.device)
+        ## first z in each trajectory memory (so the first z_{t+1} that follows a key (h_t, z_t, a_t))
         self.next_z : torch.Tensor     = torch.empty((self.max_elements, self.z_size), dtype=torch.float32, device = self.device)
         
         self.current_trajectory: TrajectoryObject | None = None
@@ -165,7 +166,7 @@ class GPUEpisodicMemory():
         self.num_trajectories -= 1
     
     ## TODO: check is this is currect with imagined_prior, recurrent_state
-    def step(self, h: torch.Tensor, z: torch.Tensor, a: torch.Tensor, uncertainty: float, done:bool=False) -> None:
+    def step(self, h: torch.Tensor, z: torch.Tensor, a: torch.Tensor, uncertainty: float, done:bool = False) -> None:
         """ 
         Step through the memory with new transition.
 
@@ -179,8 +180,8 @@ class GPUEpisodicMemory():
 
         Args:
             h (torch.Tensor): The recurrent state.
-            z (torch.Tensor): The stochastic state.
-            a (torch.Tensor): The action taken based on this (h, z). ~TODO: so ist das gearde zumindest
+            z (torch.Tensor): The stochastic state (this was predicted based on this h + x).
+            a (torch.Tensor): The action taken based on this (h, z). ~TODO: so ist das gerade zumindest
             uncertainty (float): The uncertainty of the current state.
             done (bool, optional): Whether the episode is done. Defaults to False.
         """
@@ -190,7 +191,8 @@ class GPUEpisodicMemory():
             if (z is None):
                 return
             self.prev_state[:self.h_size] = h
-            self.prev_state[self.h_size:self.h_size+self.z_size] = z
+            self.prev_state[self.h_size:self.h_size+self.z_size] = z    ## ~Josch: TODO: bräuchten wir ggf. nicht nur dieses um das next_z zu setzen?
+            self.prev_state[-self.a_size:] = a    ## ~Josch: TODO: bräuchten wir ggf. nicht nur dieses um das next_z zu setzen?
             self.prev_state_stored = True
             return
         # add new trajecory
@@ -199,17 +201,21 @@ class GPUEpisodicMemory():
             # value = (z, h)          # (z_t, h_t)
             # SHAPES: h: (1, 1, 4096); z_logits: (1, 1, 1024); real_actions: (1, 1, 1); rewards: (1,); dones: (1,)
 
-            if self.current_trajectory is not None and self.current_trajectory.free_space != 0:
-                self.__fill_traj(self.prev_state[-self.z_size:], a)
+            # if self.current_trajectory is not None and self.current_trajectory.free_space != 0:
+                # self.__fill_traj(self.prev_state[-self.z_size:], self.prev_state[-self.a_size:]) ## TODO: Josch: this should be: self.__fill_traj(z, a)????
+
             if len(self) >= self.max_elements:    ## TODO: -1 really necessary 
                 self._prune_memory(prune_fraction=self.prune_fraction)
-            self.__create_traj(self.prev_state[:self.h_size], self.prev_state[-self.z_size:], a, uncertainty)
+
+            self.__create_traj(self.prev_state[:self.h_size], self.prev_state[-self.z_size:], self.prev_state[-self.a_size:], uncertainty) 
+            self.__fill_traj(z, a)
             ### store next z in seperate tensor for fast access during training (ACD)
-            self.next_z[self.num_trajectories - 1] = z # self.prev_state[-self.z_shape:]
+            self.next_z[self.num_trajectories - 1] = z
         # just fill trajectory space
         elif self.current_trajectory is not None and self.current_trajectory.free_space != 0:
             assert(self.prev_state_stored)
-            self.__fill_traj(self.prev_state[-self.z_size:], a)
+            self.__fill_traj(z, a)
+            # self.__fill_traj(self.prev_state[-self.z_size:], self.prev_state[-self.a_size:])
         # no space: no trajectory
         else:
             self.current_trajectory = None
@@ -244,7 +250,7 @@ class GPUEpisodicMemory():
             skip_non_full_traj (bool): Decides whether incomplete trajectories are also returned.
         Returns:
             tuple:
-                initial_h (torch.tensor): Initial recurrent states with shape (num_trajectories, 4096).
+                initial_h (torch.tensor): Initial recurrent states with shape (1?, num_trajectories, 4096).
                 z_all (torch.tensor): Latent state sequences (logits) with shape (trajectory_length + 1, num_trajectories, 1024).
                 a_all (torch.tensor): Action sequences with shape (trajectory_length + 1, num_trajectories, 1).
                 returned_trajs_indices (torch.tensor): Indices of trajectories actually returned (since too short trajs are skipped).
@@ -252,9 +258,9 @@ class GPUEpisodicMemory():
         if len(self) == 0: return (None, None, None, None)
 
         ## Ones for non-invalid probability tensors
-        initial_h = torch.ones((1, self.num_trajectories, self.h_size), dtype=torch.float32, device=self.device)
-        z_all = torch.ones((self.trajectory_length + 1, self.num_trajectories, self.z_size), dtype=torch.float32, device=self.device)
-        a_all = torch.ones((self.trajectory_length + 1, self.num_trajectories, self.a_size), dtype=torch.float32, device=self.device)
+        initial_h   = torch.ones((1, self.num_trajectories, self.h_size), dtype=torch.float32, device=self.device)
+        z_all       = torch.ones((self.trajectory_length + 1, self.num_trajectories, self.z_size), dtype=torch.float32, device=self.device)
+        a_all       = torch.ones((self.trajectory_length + 1, self.num_trajectories, self.a_size), dtype=torch.float32, device=self.device)
         
         full_trajes = 0
         returned_trajs_indices = torch.empty(self.num_trajectories, dtype=torch.int64, device=self.device)
@@ -276,7 +282,7 @@ class GPUEpisodicMemory():
             a_s: torch.Tensor = trajectory[:,-self.a_size:].detach().clone()    # shape(length, 
 
             #  (h, z, a)
-            z_all[0, i]     = self.trajectories_tensor[i, self.h_size:-self.a_size]
+            z_all[0, i]     = self.trajectories_tensor[i, self.h_size:self.h_size+self.z_size]
             a_all[0, i]     = self.trajectories_tensor[i, -self.a_size:]
             initial_h[0, i] = self.trajectories_tensor[i, :self.h_size]
             # z_all[0, i] = np.frombuffer(key[1], dtype=np.float32)  # from shape (512,) into shape (1024,)

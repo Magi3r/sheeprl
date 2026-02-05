@@ -394,7 +394,7 @@ class RSSM(nn.Module):
         logits = self.transition_model(recurrent_out)
         return logits, compute_stochastic_state(logits, discrete=self.discrete)
 
-    def imagination(self, prior: Tensor, recurrent_state: Tensor, actions: Tensor, return_logits: bool = False) -> Tuple[Tensor, Tensor]:
+    def imagination(self, prior: Tensor, recurrent_state: Tensor, actions: Tensor) -> Tuple[Tensor, Tensor]:
         """
         One-step imagination of the next latent state.
         It can be used several times to imagine trajectories in the latent space (Transition Model).
