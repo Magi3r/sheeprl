@@ -467,7 +467,7 @@ class RSSM(nn.Module):
         logits = self._uniform_mix(logits)
         return logits, compute_stochastic_state(logits, discrete=self.discrete)
 
-    ### TODO: this is the Dynamics Predictor, need to add uncertainty calculation.
+    ### this is the Dynamics Predictor, need to add uncertainty calculation.
     def _transition(self, recurrent_out: Tensor, sample_state=True) -> Tuple[Tensor, Tensor]:
         """
         Args:
@@ -742,18 +742,19 @@ class PlayerDV3(nn.Module):
             _, self.stochastic_state = self.rssm._representation(embedded_obs)
             raise NotImplementedError("DecoupledRSSM + DreamerV3 Actor not implemented yet.")
         else:
-            ### no grad so no gradients for transision model (dont need it, dont want to train it)
-            with torch.no_grad():
-                self.rssm.transition_model.enable_mc_dropout()
-                
-                prior_logits_flat, _ = self.rssm._transition(self.recurrent_state)
-                std = prior_logits_flat.std(dim=0)  # (B, T, D)
-                uncertainty = std.mean(dim=-1)      # (B, T)
-                # Shape Mean: torch.Size([1, 4096])
-                # Shape Std: torch.Size([1, 4096])
-                # Logits Shape:torch.Size([5, 1, 4096])
+            if return_rssm_stuff:
+                ### no grad so no gradients for transision model (dont need it, dont want to train it)
+                with torch.no_grad():
+                    self.rssm.transition_model.enable_mc_dropout()
+                    
+                    prior_logits_flat, _ = self.rssm._transition(self.recurrent_state)
+                    std = prior_logits_flat.std(dim=0)  # (B, T, D)
+                    uncertainty = std.mean(dim=-1)      # (B, T)
+                    # Shape Mean: torch.Size([1, 4096])
+                    # Shape Std: torch.Size([1, 4096])
+                    # Logits Shape:torch.Size([5, 1, 4096])
 
-                self.rssm.transition_model.disable_mc_dropout()
+                    self.rssm.transition_model.disable_mc_dropout()
 
         ## z_t = Encoder(h_t, x_t)            
         self.z_logits, self.stochastic_state = self.rssm._representation(self.recurrent_state, embedded_obs)    ## z (second part from Encoder of the paper)
@@ -1155,7 +1156,7 @@ def build_agent(
                 "normalized_shape": world_model_cfg.transition_model.hidden_size,
             }
         ],
-        mc_dropout=True,
+        mc_dropout=True,    ## always create layer, but MCDropout layer is identity if not manually enabled
         mc_dropout_prob=world_model_cfg.transition_model.mc_prob,
         mc_dropout_repeat=world_model_cfg.transition_model.mc_repeat
     )

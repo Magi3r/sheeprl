@@ -49,7 +49,7 @@ import pkgutil
 # import os
 # os.environ["HYDRA_FULL_ERROR"] = "1"
 
-from sheeprl.algos.dem.utils import additive_correction_delta, parallel_additive_correction_delta
+from sheeprl.algos.dem.utils import parallel_additive_correction_delta
 # from sheeprl.algos.dem.episodic_memory import EpisodicMemory as EM
 from sheeprl.algos.dem.episodic_memory_gpu import GPUEpisodicMemory as EM
 
@@ -278,20 +278,23 @@ def train(
     # print("Their Total imagination loop duration          :", (time.perf_counter_ns()- start_time_loop)/1000_000, "ms") ### ~ 50ms
     # torch.cuda.synchronize()
     # start_time_loop = time.perf_counter_ns()
-    prev_imagined_prior = torch.empty_like(imagined_prior, device=device)
+    prev_imagined_prior_logits = posteriors_logits.detach().reshape(1, -1, stoch_state_size) ## torch.empty_like(imagined_prior, device=device)
     prev_recurrent_state = torch.empty_like(recurrent_state, device=device)
+    prev_recurrent_state.copy_(recurrent_state)
     for i in range(1, cfg.algo.horizon + 1):    ## lopin 15 times
         ## TODO: Assumption: currently these values get detached before loss backward, so no WorldModel is trained here 
         ##   (so we could combine both _transition calls in imagination for faster inference (one call for actual value, one only for uncertainties))
 
         ## TODO: check is this is currect with imagined_prior, recurrent_state
-        prev_imagined_prior.copy_(imagined_prior)
-        prev_recurrent_state.copy_(recurrent_state)
-        imagined_prior, recurrent_state, uncertainties = world_model.rssm.imagination(imagined_prior, recurrent_state, actions, return_uncertainty = True)
+        if episodic_memory is not None:
+            imagined_prior_logits, recurrent_state, uncertainties = world_model.rssm.imagination(imagined_prior, recurrent_state, actions, \
+                                                                                          return_logits=True, return_uncertainty = True)
+        else:
+            imagined_prior, recurrent_state = world_model.rssm.imagination(imagined_prior, recurrent_state, actions, return_uncertainty = False)
+            imagined_prior = imagined_prior.view(1, -1, stoch_state_size)   ## after: -> [1, 1024, 1024]
         # assert(not torch.equal(prev_imagined_prior, imagined_prior))
 
         ### update treshold based on rolling mean and std ~0.145592ms
-        imagined_prior = imagined_prior.view(1, -1, stoch_state_size)   ## after: -> [1, 1024, 1024]
         if episodic_memory is not None:
             read_dream_mean_std[0] = torch.mean(uncertainties) * cfg.episodic_memory.read_exp_mov_avg_alpha + read_dream_mean_std[0] * (1 - cfg.episodic_memory.read_exp_mov_avg_alpha)           
             read_dream_mean_std[1] = torch.std(uncertainties) * cfg.episodic_memory.read_exp_mov_avg_alpha + read_dream_mean_std[1] * (1 - cfg.episodic_memory.read_exp_mov_avg_alpha)
@@ -305,7 +308,7 @@ def train(
                 ## ACDs: [num_uncertainties>_threashold, 1, 1024]
                 ## TODO: AKTUELL: query = (h_t+1, z_t+1, a_t)
                 ACDs: torch.tensor = parallel_additive_correction_delta(prev_recurrent_state[:, uncertainty_mask, :], 
-                                                                    prev_imagined_prior[:, uncertainty_mask, :], 
+                                                                    prev_imagined_prior_logits[:, uncertainty_mask, :], 
                                                                     actions[:, uncertainty_mask, :], 
                                                                     episodic_memory, 
                                                                     world_model, 
@@ -313,7 +316,14 @@ def train(
                                                                     device=device,
                                                                     cfg=cfg)
 
-                imagined_prior[:, uncertainty_mask, :] += ACDs
+                imagined_prior_logits[:, uncertainty_mask, :] += ACDs
+
+                prev_recurrent_state.copy_(recurrent_state)
+                prev_imagined_prior_logits.copy_(imagined_prior_logits)
+
+            imagined_prior = compute_stochastic_state(imagined_prior_logits, discrete=world_model.rssm.discrete, sample=True)
+            imagined_prior = imagined_prior.view(1, -1, stoch_state_size)
+
         imagined_latent_state = torch.cat((imagined_prior, recurrent_state), -1)
         imagined_trajectories[i] = imagined_latent_state
         actions = torch.cat(actor(imagined_latent_state.detach())[0], dim=-1)
@@ -502,7 +512,7 @@ def rehearsal_train(fabric:             Fabric,
         posteriors_logits   = all_posteriors_logits[:, i:i+j]
         actions             = all_actions[:, i:i+j]
 
-        posteriors = compute_stochastic_state(posteriors_logits) ## torch.empty(traj_length, batch_size, stochastic_size, discrete_size, device=device)
+        posteriors = compute_stochastic_state(posteriors_logits, discrete=world_model.rssm.discrete, sample=True) ## torch.empty(traj_length, batch_size, stochastic_size, discrete_size, device=device)
         posteriors = posteriors.view(*posteriors.shape[:-2], -1) ## => (traj_length, batch_size, stochastic_size * discrete_size)
         
         ## setting first z based on initial h
@@ -720,9 +730,6 @@ def main(fabric: Fabric, cfg: Dict[str, Any]):
     world_optimizer = hydra.utils.instantiate(
         cfg.algo.world_model.optimizer, params=world_model.parameters(), _convert_="all"
     )
-    world_optimizer_no_encoder_decoder = hydra.utils.instantiate(
-        cfg.algo.world_model.optimizer, params=world_model.parameters(), _convert_="all"
-    )
     actor_optimizer = hydra.utils.instantiate(cfg.algo.actor.optimizer, params=actor.parameters(), _convert_="all")
     critic_optimizer = hydra.utils.instantiate(cfg.algo.critic.optimizer, params=critic.parameters(), _convert_="all")
     if cfg.checkpoint.resume_from:
@@ -924,9 +931,12 @@ def main(fabric: Fabric, cfg: Dict[str, Any]):
                     ## player does consist of RSSM und Actor, so lets not only return action but also the rssm stuff
                     ### here and probably during rehearsal training, we need the (1,x) shape, but within the lookup in side the predictor (x,)
                     ### So need to discuss how to store them, (or more, how to restore)
-                    actions, h, z_logits, uncertainty = player.get_actions(torch_obs, mask=mask, return_rssm_stuff=True)
-                    # h, z_logits = h.cpu().numpy(), z_logits.cpu().numpy()
+                    if cfg.episodic_memory.use_episodic_memory: 
+                        actions, h, z_logits, uncertainty = player.get_actions(torch_obs, mask=mask, return_rssm_stuff=True)
+                    else:
+                        actions = player.get_actions(torch_obs, mask=mask, return_rssm_stuff=False)
                     real_actions = actions
+                    # h, z_logits = h.cpu().numpy(), z_logits.cpu().numpy()
                     actions = torch.cat(actions, -1)
                     if is_continuous:
                         real_actions = torch.stack(real_actions, dim=-1).cpu().numpy()
@@ -950,8 +960,9 @@ def main(fabric: Fabric, cfg: Dict[str, Any]):
                 # em_insert_threshold = np.percentile(last_N_env_uncertainties, cfg.episodic_memory.percentile_treshold)
                 # episodic_memory.set_threshold(em_insert_threshold)
                 
+                ## only relevant for first if (so filling buffer case)
                 if type(actions) != np.ndarray:
-                    step_data["actions"] = actions.reshape((1, cfg.env.num_envs, -1)).cpu().numpy()
+                    step_data["actions"] = actions.cpu().numpy().reshape((1, cfg.env.num_envs, -1))
                 else:
                     step_data["actions"] = actions.reshape((1, cfg.env.num_envs, -1))
                     actions = torch.from_numpy(actions).to(device=device)
@@ -986,7 +997,7 @@ def main(fabric: Fabric, cfg: Dict[str, Any]):
                     # print(episodic_memory)
                 ## Update Episodic Memory
                 # uncertainty = np.array([0.8])
-                # if cfg.episodic_memory.enable_rehersal_training:
+                # if cfg.episodic_memory.enable_rehearsal_training:
                 if cfg.episodic_memory.use_episodic_memory:
                     episodic_memory.step(
                         h=h,
@@ -1114,7 +1125,7 @@ def main(fabric: Fabric, cfg: Dict[str, Any]):
                     train_step += world_size
             # end_time = time.time()
             # print(f"training per_rank_gradient_steps:{per_rank_gradient_steps}, seq_len: {cfg.algo.per_rank_sequence_length} times took {(end_time - start_time)/1000} seconds ")
-            if cfg.episodic_memory.use_episodic_memory and cfg.episodic_memory.enable_rehersal_training and iter_num % cfg.episodic_memory.rehersal_train_every == 0:
+            if cfg.episodic_memory.use_episodic_memory and cfg.episodic_memory.enable_rehearsal_training and iter_num % cfg.episodic_memory.rehearsal_train_every == 0:
                 rehearsal_train(
                     fabric          = fabric,
                     world_model     = world_model,

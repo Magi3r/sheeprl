@@ -161,6 +161,7 @@ class MLP(nn.Module):
             model += miniblock(in_dim, out_dim, nn.Linear, l_args, drop, drop_args, norm, norm_args, activ, act_args)
 
         if mc_dropout:
+            # raise Exception("DROPTOUT FULLY COMMENTED OUT!!!")
             self._mc_dropout_prob = mc_dropout_prob
             model += [MCDropout(mc_dropout_prob, mc_dropout_repeat)]
             self.mc_dropout_repeat = mc_dropout_repeat

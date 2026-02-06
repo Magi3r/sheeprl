@@ -241,44 +241,6 @@ def log_models_from_checkpoint(
         mlflow.log_dict(cfg.to_log, "config.json")
     return model_info
 
-def additive_correction_delta(key: tuple[np.array, np.array, np.array], episodic_memory: EM, world_model: WorldModel, k: int, device: torch.device) -> np.array:
-    """Calculating Additive Correction Delta (ACD); Works only on logits"""
-
-    h_size = key[0].shape[1]
-    z_size = key[1].shape[1]
-    a_size = key[2].shape[1]
-
-    if len(episodic_memory) < k:
-        # print("warning: EM is empty")
-        return np.zeros(z_size)
-    
-    nn_keys, nn_trajectories = episodic_memory.kNN(key, k)
-    ## from key:        recurrent_states, prior_logits, actions; shape: (k, 5128)
-    ## from trajectory: trajectory_starts = next_prior_logits, _ = z_t1, a_t1
-
-    recurrent_states = torch.from_numpy(nn_keys[:, :h_size]).to(device=0).unsqueeze(0)  ## (1, k, 4096)
-    prior_logits = torch.from_numpy(nn_keys[:, h_size:h_size+z_size]).to(device=device) ## (1, k, 1024)
-    actions = torch.from_numpy(nn_keys[:, h_size+z_size:]).to(device=0).unsqueeze(0)    ## (1, k, 6)
-    priors = compute_stochastic_state(prior_logits.unsqueeze(0))    # .squeeze(0) ## torch.Size([1, k, 32, 32]); 1 = only single sample, not a entire trajectory
-    priors = priors.view(*priors.shape[:-2], -1)
-
-    n = k ## should be = nn_keys.shape[0]
-
-    trajectory_starts = np.array([traj_obj.get_trajectory(idx)[0] for traj_obj, idx, _, _ in nn_trajectories])##.reshape(n, z_size + a_size)
-
-    # print("trajectory_starts shape: ", trajectory_starts.shape)
-
-    next_prior_logits = trajectory_starts[:, :z_size]                             ## from trajectory
-
-    ## apply world_model (Sequence + Dynamics model) on keys
-    next_imagined_prior_logits, _ = world_model.rssm.imagination(priors, recurrent_states, actions, return_logits=True)
-    # next_imagined_priors = compute_stochastic_state(next_imagined_prior_logits.unsqueeze(0)).squeeze(0) ## we dont need this
-
-    ## calculate additive correction delta
-    acd = next_prior_logits - next_imagined_prior_logits.cpu().detach().numpy()
-
-    return acd
-
 def parallel_additive_correction_delta(recurrent_states: torch.tensor, prior_logits: torch.tensor, actions: torch.tensor, episodic_memory: EM, world_model: WorldModel, k: int, device: torch.device, cfg) -> torch.tensor:
     """Calculating Additive Correction Delta (ACD)
     
@@ -322,7 +284,7 @@ def parallel_additive_correction_delta(recurrent_states: torch.tensor, prior_log
         knn_recurrent_states = nn_keys[:, :h_size].unsqueeze(0)             ## [1, 1024 * 5, 4096]
         knn_actions = nn_keys[:, h_size+z_size:].unsqueeze(0)               ## [1, 1024 * 5, 6]
 
-        knn_priors = compute_stochastic_state(knn_prior_logits)    ## [1, 1024*5, 1024]
+        knn_priors = compute_stochastic_state(knn_prior_logits, discrete=world_model.rssm.discrete, sample=True)    ## [1, 1024*5, 1024]
         knn_priors = knn_priors.view(*(knn_priors.shape[:-2]), -1)              ## view: [1, 1024 * 5, 32, 32] -> [1, 1024 * 5, 1024]
         # print(f"PREPARE part duration: {(time.perf_counter_ns()- start)/1000_000}ms")
         ## what works with imagination:
