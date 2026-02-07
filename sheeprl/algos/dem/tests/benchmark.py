@@ -1,15 +1,10 @@
 # /// script
 # dependencies = [
-#   "sheeprl@/workspaces/sheeprl",
 #   "numpy",
 #   "torch",
 #   "memory_profiler",
-#   "hnswlib",
 #   "tqdm",
-#   "scikit-learn",
-#   "sortedcontainers",
-#   "lightning",
-#   "gymnasium"
+#   "scikit-learn"
 # ]
 # ///
 
@@ -22,20 +17,17 @@ import os
 from memory_profiler import profile
 from tqdm import tqdm
 
-
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 from episodic_memory import EpisodicMemory
-from utils import additive_correction_delta
-from agent import build_agent
 
 def fake_state(z_dim=32, h_dim=32):
     return {
-        "stoch": np.random.rand(z_dim).astype(np.float32),
-        "deter": np.random.rand(h_dim).astype(np.float32),
+        "stoch": torch.randn(z_dim),
+        "deter": torch.randn(h_dim),
     }
 
 def fake_action(a_dim=8):
-    return np.random.rand(a_dim).astype(np.float32)
+    return torch.randn(a_dim)
 
 def fake_uncertainty(p_high=0.1):
     """With probability p_high produce high uncertainty"""
@@ -46,17 +38,16 @@ def benchmark_em(
     steps=100_000,
     trajectory_length=10,
     uncertainty_threshold=0.8,
-    z_dim=1024,
-    h_dim=4096,
+    z_dim=32,
+    h_dim=32,
     a_dim=8,
     done_prob=0.01,
 ):
     em = EpisodicMemory(
         trajectory_length=trajectory_length,
         uncertainty_threshold=uncertainty_threshold,
-        z_shape=z_dim,
-        h_shape=h_dim,
-        a_shape=(a_dim,),
+        z_shape=(z_dim,),
+        action_shape=(a_dim,),
         k_nn=5,
     )
 
@@ -106,7 +97,7 @@ def benchmark_deletion(em: EpisodicMemory):
 def validate_em(em: EpisodicMemory):
     errors = []
 
-    for key, (traj_obj, idx, unc, ttl) in em.trajectories.items():
+    for key, (traj_obj, idx, unc) in em.trajectories.items():
         if traj_obj.free_space < 0:
             errors.append("Negative free_space")
 
@@ -123,17 +114,17 @@ def validate_em(em: EpisodicMemory):
 def benchmark_knn(
     em: EpisodicMemory,
     num_keys=10_000,
-    z_dim=1024,
-    h_dim=4096,
+    z_dim=32,
+    h_dim=32,
     a_dim=8,
     k=5
 ):
     # generate fake keys
     keys = [
         (
-            np.random.rand(z_dim).astype(np.float32).tobytes(),
-            np.random.rand(h_dim).astype(np.float32).tobytes(),
-            np.random.rand(a_dim).astype(np.float32).tobytes()
+            torch.randn(z_dim),
+            torch.randn(h_dim),
+            torch.randn(a_dim)
         )
         for _ in range(num_keys)
     ]
@@ -149,54 +140,10 @@ def benchmark_knn(
         "k": k,
         "total_time": kNN_time
     }
-
-def benchmark_acd(
-    em: EpisodicMemory,
-    num_keys=1,
-    z_dim=1024,
-    h_dim=4096,
-    a_dim=8,
-    k=5
-):
-    # generate fake keys
-    keys = [
-        (
-            np.random.rand(z_dim).astype(np.float32).tobytes(),
-            np.random.rand(h_dim).astype(np.float32).tobytes(),
-            np.random.rand(a_dim).astype(np.float32).tobytes()
-        )
-        for _ in range(num_keys)
-    ]
-    # world_model, _, _, _, player = build_agent(
-    #     fabric,
-    #     actions_dim,
-    #     is_continuous,
-    #     cfg,
-    #     observation_space,
-    #     state["world_model"] if cfg.checkpoint.resume_from else None,
-    #     state["actor"] if cfg.checkpoint.resume_from else None,
-    #     state["critic"] if cfg.checkpoint.resume_from else None,
-    #     state["target_critic"] if cfg.checkpoint.resume_from else None,
-    # )
-
-    world_model = None # TODO
-    t0 = time.perf_counter()
-    for key in tqdm(keys, desc="ACD operations"):
-        acd = additive_correction_delta(key, em, world_model, k)
-        pass
-        # em.kNN(key, k)
-    kNN_time = time.perf_counter() - t0
-    
-    return {
-        "num_keys": num_keys,
-        "dim": (z_dim,h_dim,a_dim),
-        "k": k,
-        "total_time": kNN_time
-    }
     
 
 if __name__ == "__main__":
-    em, stats = benchmark_em(steps=1_000, uncertainty_threshold=0.0)
+    em, stats = benchmark_em(steps=500_000, uncertainty_threshold=0.0)
 
     print("=== EM Benchmark ===")
     print(f"Steps: {stats['steps']}")
@@ -204,19 +151,13 @@ if __name__ == "__main__":
     print(f"Steps/sec: {stats['steps_per_sec']:.0f}")
     print(f"Stored trajectories: {stats['num_trajectories']}")
     
-    print("\nTEST ACD")
-    print("-"*30)
-    kNN_stats = benchmark_acd(em, num_keys=100_000, k=5)
-    print("-"*30)
-    
-
-    kNN_stats = benchmark_knn(em, num_keys=100_000, k=5)
-    print("\n=== kNN Benchmark ===")
-    print(f"Num keys: {kNN_stats['num_keys']}")
-    print(f"Total time: {kNN_stats['total_time']:.2f}s")
-    print(f"Steps/sec: {kNN_stats['num_keys']/kNN_stats['kNN_time']:.0f}")
-    print(f"Dims: {kNN_stats['dims']}")
-    print(f"k: {kNN_stats['k']}")
+    # kNN_stats = benchmark_knn(em, num_keys=100_000, k=5)
+    # print("\n=== kNN Benchmark ===")
+    # print(f"Num keys: {kNN_stats['num_keys']}")
+    # print(f"Total time: {kNN_stats['total_time']:.2f}s")
+    # print(f"Steps/sec: {kNN_stats['num_keys']/kNN_stats['kNN_time']:.0f}")
+    # print(f"Dims: {kNN_stats['dims']}")
+    # print(f"k: {kNN_stats['k']}")
 
     del_stats = benchmark_deletion(em)
     print("\n=== Deletion Benchmark ===")
