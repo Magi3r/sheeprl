@@ -89,7 +89,7 @@ def load_array(path: str):
         arr: torch.Tensor = torch.load(path, map_location="cpu")
     return arr
 
-
+@torch._dynamo.disable
 def exact_search(
     arr1: np.ndarray | torch.Tensor | str,
     arr2: np.ndarray | torch.Tensor | str,

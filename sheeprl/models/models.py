@@ -24,25 +24,26 @@ class MCDropout(nn.Dropout):
         self.num_mc_repeat = num_mc_repeat
         self.enabled = False
 
-    def disable(self) -> None:
-        """
-        Disables the dropout
-        """
-        self.enabled = False
+    # def disable(self) -> None:
+    #     """
+    #     Disables the dropout
+    #     """
+    #     self.enabled = False
 
-    def enable(self) -> None:
-        """
-        Enables the dropout
-        """
-        self.enabled = True
+    # def enable(self) -> None:
+    #     """
+    #     Enables the dropout
+    #     """
+    #     self.enabled = True
 
-    def forward(self, input: Tensor) -> Tensor:
+    def forward(self, input: Tensor, enabled: bool) -> Tensor:
         """
         Runs the forward pass.
         With 'training' always set True when enabled, so also dropping out during inference.
         """
         # return F.dropout(input, self.p, self.enabled, self.inplace)
-        if not self.enabled or self.p == 0.0:
+        # if not self.enabled or self.p == 0.0:
+        if not enabled or self.p == 0.0:
             return input
 
         # x: (B, D)
@@ -186,21 +187,34 @@ class MLP(nn.Module):
     def flatten_dim(self) -> Optional[int]:
         return self._flatten_dim
 
+    # @no_type_check
+    # def forward(self, obs: Tensor) -> Tensor:
+    #     if self.flatten_dim is not None:
+    #         obs = obs.flatten(self.flatten_dim)
+    #     return self.model(obs)
     @no_type_check
-    def forward(self, obs: Tensor) -> Tensor:
+    def forward(self, obs: Tensor, mc_dropout: bool = False) -> Tensor:
         if self.flatten_dim is not None:
             obs = obs.flatten(self.flatten_dim)
-        return self.model(obs)
 
-    def enable_mc_dropout(self):
-        for module in self._model.modules():
-            if isinstance(module, MCDropout):
-                module.enable()
+        x = obs
+        for m in self._model:
+            if isinstance(m, MCDropout):
+                x = m(x, mc_dropout)
+            else:
+                x = m(x)
+        return x
 
-    def disable_mc_dropout(self):
-        for module in self._model.modules():
-            if isinstance(module, MCDropout):
-                module.disable()
+
+    # def enable_mc_dropout(self):
+    #     for module in self._model.modules():
+    #         if isinstance(module, MCDropout):
+    #             module.enable()
+
+    # def disable_mc_dropout(self):
+    #     for module in self._model.modules():
+    #         if isinstance(module, MCDropout):
+    #             module.disable()
 
 
 class CNN(nn.Module):

@@ -165,3 +165,7 @@ world_model:
 # Player agent (it interacts with the environment)
 # player:
   # discrete_size: ${algo.world_model.discrete_size}
+
+compile_em:
+  disable: False
+  fullgraph: False

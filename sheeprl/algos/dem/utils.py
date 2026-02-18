@@ -241,7 +241,7 @@ def log_models_from_checkpoint(
         mlflow.log_dict(cfg.to_log, "config.json")
     return model_info
 
-def parallel_additive_correction_delta(recurrent_states: torch.tensor, prior_logits: torch.tensor, actions: torch.tensor, episodic_memory: EM, world_model: WorldModel, k: int, device: torch.device, cfg) -> torch.tensor:
+def parallel_additive_correction_delta(recurrent_states: torch.tensor, prior_logits: torch.tensor, actions: torch.tensor, episodic_memory: EM, world_model: WorldModel, k: int, device: torch.device, adc_weighting: bool) -> torch.tensor:
     """Calculating Additive Correction Delta (ACD)
     
     Args:
@@ -267,7 +267,7 @@ def parallel_additive_correction_delta(recurrent_states: torch.tensor, prior_log
         # print("score shape: ", scores.shape)  ## torch.Size([483, 10])
         indices = indices.view(-1)#flatten() ## indices shape: (num_uncertain_things * k)
         # print(f"KNN part duration                       : {(time.perf_counter_ns()- start)/1000_000}ms")
-        if cfg.episodic_memory.adc_weighting:
+        if adc_weighting:
             sum_scores = torch.sum(scores, dim=1, keepdim=True) + 1e-12
             scores[:] = scores / sum_scores #.unsqueeze(-1)
             # print("weights shape: ", weights.shape)
@@ -301,7 +301,7 @@ def parallel_additive_correction_delta(recurrent_states: torch.tensor, prior_log
         ## calculate additive correction delta
         acd = next_prior_logits - next_imagined_prior_logits
         acd = acd.view(their_seq, k, z_size)
-        if cfg.episodic_memory.adc_weighting:
+        if adc_weighting:
             acd[:] = acd.mul(scores)
             acd = acd.sum(1)
         else:

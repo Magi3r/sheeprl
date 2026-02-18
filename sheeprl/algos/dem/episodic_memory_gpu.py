@@ -56,6 +56,7 @@ class GPUEpisodicMemory():
         print("shapes EM: ", self.h_size, self.z_size, self.a_size)
         self.key_size = self.h_size + self.z_size + self.a_size
         """Size of the key vector (h, z, a)"""
+        print("device", self.device, flush=True)
 
         self.k_nn: int = k_nn
         self.max_elements: int = max_elements
@@ -95,11 +96,17 @@ class GPUEpisodicMemory():
         self.stochastic_size = self.cfg.algo.world_model.stochastic_size
         self.discrete_size = self.cfg.algo.world_model.discrete_size
 
+        if not config.algo.compile_em.disable:
+            self.get_samples = torch.compile(self.__get_samples, fullgraph=config.algo.compile_em.fullgraph)
+        else:
+            self.get_samples = self.__get_samples
+
     def set_threshold(self, uncertainty_threshold: float =  0.9):
         self.uncertainty_threshold = uncertainty_threshold
 
     def __len__(self):
         return self.num_trajectories
+
 
     ##### ssshhoouuullddd be correct? 
     def __create_traj(self, h: torch.Tensor, z: torch.Tensor, a: torch.Tensor, uncertainty: float):
@@ -239,7 +246,7 @@ class GPUEpisodicMemory():
         return f"EM| Num trajectories: {self.num_trajectories}| Trajectory length: {self.trajectory_length}| Uncertainty thr.: {self.uncertainty_threshold}| Current trajectory: {self.current_trajectory}"
 
     ##### ssshhoouuullddd be correct? 
-    def get_samples(self, skip_non_full_traj: bool = True) -> tuple[torch.Tensor|None, torch.Tensor|None, torch.Tensor|None, torch.Tensor|None]:
+    def __get_samples(self, skip_non_full_traj: bool = True) -> tuple[torch.Tensor|None, torch.Tensor|None, torch.Tensor|None, torch.Tensor|None]:
         """
         Return all stored trajectories in batched form for training.
 

@@ -8,7 +8,8 @@ import copy
 import os
 import warnings
 from functools import partial
-from typing import Any, Dict, Sequence
+# from typing import Any, Dict, Sequence
+from typing import Any, Callable, Dict, Sequence, Tuple
 import time
 
 import gymnasium as gym
@@ -57,6 +58,179 @@ from sheeprl.algos.dem.episodic_memory_gpu import GPUEpisodicMemory as EM
 # os.environ["PYOPENGL_PLATFORM"] = ""
 # os.environ["MUJOCO_GL"] = "osmesa"
 
+def dynamic_learning(
+    world_model: WorldModel,
+    data: Dict[str, Tensor],
+    batch_actions: Tensor,
+    embedded_obs: Dict[str, Tensor],
+    stochastic_size: int,
+    discrete_size: int,
+    recurrent_state_size: int,
+    batch_size: int,
+    sequence_length: int,
+    decoupled_rssm: bool,
+    device: torch.device,
+) -> Tuple[Tensor, Tensor, Tensor, Tensor, Tensor]:
+    # Dynamic Learning
+    stoch_state_size = stochastic_size * discrete_size
+    recurrent_state = torch.zeros(1, batch_size, recurrent_state_size, device=device)
+    recurrent_states = torch.empty(sequence_length, batch_size, recurrent_state_size, device=device)
+    priors_logits = torch.empty(sequence_length, batch_size, stoch_state_size, device=device)
+
+    if decoupled_rssm:
+        posteriors_logits, posteriors = world_model.rssm._representation(embedded_obs)
+        for i in range(0, sequence_length):
+            if i == 0:
+                posterior = torch.zeros_like(posteriors[:1])
+            else:
+                posterior = posteriors[i - 1 : i]
+            recurrent_state, posterior_logits, prior_logits = world_model.rssm.dynamic(
+                posterior,
+                recurrent_state,
+                batch_actions[i : i + 1],
+                data["is_first"][i : i + 1],
+            )
+            recurrent_states[i] = recurrent_state
+            priors_logits[i] = prior_logits
+    else:
+        posterior = torch.zeros(1, batch_size, stochastic_size, discrete_size, device=device)
+        posteriors = torch.empty(sequence_length, batch_size, stochastic_size, discrete_size, device=device)
+        posteriors_logits = torch.empty(sequence_length, batch_size, stoch_state_size, device=device)
+        for i in range(0, sequence_length):
+            recurrent_state, posterior, _, posterior_logits, prior_logits = world_model.rssm.dynamic(
+                posterior,
+                recurrent_state,
+                batch_actions[i : i + 1],
+                embedded_obs[i : i + 1],
+                data["is_first"][i : i + 1],
+            )
+            recurrent_states[i] = recurrent_state
+            priors_logits[i] = prior_logits
+            posteriors[i] = posterior
+            posteriors_logits[i] = posterior_logits
+    latent_states = torch.cat((posteriors.view(*posteriors.shape[:-2], -1), recurrent_states), -1)
+    return latent_states, priors_logits, posteriors_logits, posteriors, recurrent_states
+
+
+def behaviour_learning(
+    posteriors: torch.Tensor,
+    recurrent_states: torch.Tensor,
+    posteriors_logits: torch.Tensor,
+    data: Dict[str, torch.Tensor],
+    world_model: WorldModel,
+    actor: _FabricModule,
+    stoch_state_size: int,
+    recurrent_state_size: int,
+    batch_size: int,
+    sequence_length: int,
+    horizon: int,
+    device: torch.device,
+    episodic_memory: EM | None,
+    read_dream_mean_std: torch.tensor,
+    read_z: float = 1.0,
+    use_acd: bool = False,
+    adc_weighting: bool = False,
+    k_neighbors: int = 10,
+    read_exp_mov_avg_alpha: float = 0.99, ## TOIDO: default value make sense?
+) -> Tuple[torch.Tensor, torch.Tensor]:
+    imagined_prior = posteriors.detach().reshape(1, -1, stoch_state_size)               ## ? wird später in imagination überschrieben ~Josch
+    recurrent_state = recurrent_states.detach().reshape(1, -1, recurrent_state_size)
+    imagined_latent_state = torch.cat((imagined_prior, recurrent_state), -1)
+    imagined_trajectories = torch.empty(
+        horizon + 1,
+        batch_size * sequence_length,
+        stoch_state_size + recurrent_state_size,
+        device=device,
+    )
+    imagined_trajectories[0] = imagined_latent_state
+    imagined_actions = torch.empty(
+        horizon+ 1,
+        batch_size * sequence_length,
+        data["actions"].shape[-1],
+        device=device,
+    )
+    actions = torch.cat(actor(imagined_latent_state.detach())[0], dim=-1)
+    imagined_actions[0] = actions
+
+    prev_imagined_prior_logits = posteriors_logits.detach().reshape(1, -1, stoch_state_size) ## torch.empty_like(imagined_prior, device=device)
+    prev_recurrent_state = torch.empty_like(recurrent_state, device=device)
+    prev_recurrent_state.copy_(recurrent_state)
+    for i in range(1, horizon + 1):    ## lopin 15 times
+        ## TODO: Assumption: currently these values get detached before loss backward, so no WorldModel is trained here 
+        ##   (so we could combine both _transition calls in imagination for faster inference (one call for actual value, one only for uncertainties))
+        if episodic_memory is not None:
+            imagined_prior_logits, recurrent_state, uncertainties = world_model.rssm.imagination(imagined_prior, recurrent_state, actions, \
+                                                                                          return_logits=True, return_uncertainty = True)
+        else:
+            imagined_prior, recurrent_state = world_model.rssm.imagination(imagined_prior, recurrent_state, actions, return_uncertainty = False)
+            imagined_prior = imagined_prior.view(1, -1, stoch_state_size)   ## after: -> [1, 1024, 1024]
+        ### update treshold based on rolling mean and std ~0.145592ms
+        if episodic_memory is not None:
+            read_dream_mean_std[0] = torch.mean(uncertainties) * read_exp_mov_avg_alpha + read_dream_mean_std[0] * (1 - read_exp_mov_avg_alpha)           
+            read_dream_mean_std[1] = torch.std(uncertainties) * read_exp_mov_avg_alpha + read_dream_mean_std[1] * (1 - read_exp_mov_avg_alpha)
+            lookup_treshold = read_dream_mean_std[0] + read_z * read_dream_mean_std[1]
+
+            if use_acd:
+                k: int = k_neighbors
+
+                uncertainty_mask = uncertainties > lookup_treshold          ## shape [1024]
+
+                ## ACDs: [num_uncertainties>_threashold, 1, 1024]
+                ## TODO: AKTUELL: query = (h_t+1, z_t+1, a_t)
+                ACDs: torch.tensor = parallel_additive_correction_delta(prev_recurrent_state[:, uncertainty_mask, :], 
+                                                                    prev_imagined_prior_logits[:, uncertainty_mask, :], 
+                                                                    actions[:, uncertainty_mask, :], 
+                                                                    episodic_memory, 
+                                                                    world_model, 
+                                                                    k, 
+                                                                    device=device,
+                                                                    adc_weighting=adc_weighting)
+
+                imagined_prior_logits[:, uncertainty_mask, :] += ACDs
+
+                prev_recurrent_state.copy_(recurrent_state)
+                prev_imagined_prior_logits.copy_(imagined_prior_logits)
+
+            imagined_prior = compute_stochastic_state(imagined_prior_logits, discrete=world_model.rssm.discrete, sample=True)
+            imagined_prior = imagined_prior.view(1, -1, stoch_state_size)
+
+        imagined_latent_state = torch.cat((imagined_prior, recurrent_state), -1)
+        imagined_trajectories[i] = imagined_latent_state
+        actions = torch.cat(actor(imagined_latent_state.detach())[0], dim=-1)
+        imagined_actions[i] = actions
+    ##############################################################################################################################################################
+
+    # imagined_prior = posteriors.detach().reshape(1, -1, stoch_state_size)
+    # recurrent_state = recurrent_states.detach().reshape(1, -1, recurrent_state_size)
+    # imagined_latent_state = torch.cat((imagined_prior, recurrent_state), -1)
+    # imagined_trajectories = torch.empty(
+    #     horizon + 1,
+    #     batch_size * sequence_length,
+    #     stoch_state_size + recurrent_state_size,
+    #     device=device,
+    # )
+    # imagined_trajectories[0] = imagined_latent_state
+    # imagined_actions = torch.empty(
+    #     horizon + 1,
+    #     batch_size * sequence_length,
+    #     data["actions"].shape[-1],
+    #     device=device,
+    # )
+    # actions_list, _ = actor(imagined_latent_state.detach())
+    # actions = torch.cat(actions_list, dim=-1)
+    # imagined_actions[0] = actions
+
+    # # Imagine trajectories in the latent space
+    # for i in range(1, horizon + 1):
+    #     imagined_prior, recurrent_state = world_model.rssm.imagination(imagined_prior, recurrent_state, actions)
+    #     imagined_prior = imagined_prior.view(1, -1, stoch_state_size)
+    #     imagined_latent_state = torch.cat((imagined_prior, recurrent_state), -1)
+    #     imagined_trajectories[i] = imagined_latent_state
+    #     actions_list, _ = actor(imagined_latent_state.detach())
+    #     actions = torch.cat(actions_list, dim=-1)
+    #     imagined_actions[i] = actions
+
+    return imagined_trajectories, imagined_actions
 
 def train(
     fabric: Fabric,
@@ -73,6 +247,9 @@ def train(
     is_continuous: bool,
     actions_dim: Sequence[int],
     moments: Moments,
+    compiled_dynamic_learning: Callable,
+    compiled_behaviour_learning: Callable,
+    compiled_compute_lambda_values: Callable,
     episodic_memory: EM | None,
     read_dream_mean_std: torch.tensor,
     read_z: float = 1.0,
@@ -121,61 +298,82 @@ def train(
 
     # Dynamic Learning
     stoch_state_size = stochastic_size * discrete_size  ## e.g. 32x32
-    recurrent_state = torch.zeros(1, batch_size, recurrent_state_size, device=device)
-    recurrent_states = torch.empty(sequence_length, batch_size, recurrent_state_size, device=device)
-    priors_logits = torch.empty(sequence_length, batch_size, stoch_state_size, device=device)
+
+    ##############################################################################################################################################################################
+    # recurrent_state = torch.zeros(1, batch_size, recurrent_state_size, device=device)
+    # recurrent_states = torch.empty(sequence_length, batch_size, recurrent_state_size, device=device)
+    # priors_logits = torch.empty(sequence_length, batch_size, stoch_state_size, device=device)
+    ##############################################################################################################################################################################
 
     # Embed observations from the environment
     embedded_obs = world_model.encoder(batch_obs) ## embedded_obs -> torch.Size([64, 16, 12288]
-    ### i think we only use coupled???
-    if cfg.algo.world_model.decoupled_rssm:
-        posteriors_logits, posteriors = world_model.rssm._representation(embedded_obs)
-        for i in range(0, sequence_length):
-            if i == 0:
-                posterior = torch.zeros_like(posteriors[:1])
-            else:
-                posterior = posteriors[i - 1 : i]
-            recurrent_state, posterior_logits, prior_logits = world_model.rssm.dynamic(
-                posterior,
-                recurrent_state,
-                batch_actions[i : i + 1],
-                data["is_first"][i : i + 1],
-            )
-            recurrent_states[i] = recurrent_state
-            priors_logits[i] = prior_logits
-    else:
-        posterior = torch.zeros(1, batch_size, stochastic_size, discrete_size, device=device)
-        posteriors = torch.empty(sequence_length, batch_size, stochastic_size, discrete_size, device=device)
-        posteriors_logits = torch.empty(sequence_length, batch_size, stoch_state_size, device=device)
-        for i in range(0, sequence_length):
-            ### h, z, z^
 
-            recurrent_state, posterior, _, posterior_logits, prior_logits = world_model.rssm.dynamic(
-                posterior,
-                recurrent_state,
-                batch_actions[i : i + 1],
-                embedded_obs[i : i + 1],
-                data["is_first"][i : i + 1],
-            )
-            # print("THEIR DYNAMICS")
-            # print("prior shape:", prior_logits.shape)
-            # print("recurrent_state shape:", recurrent_state.shape)
-            # print("actions shape:", batch_actions[i : i + 1].shape)
-            # print("post shape:", posterior.shape)
-            # # THEIR DYNAMICS
-            # # prior shape: torch.Size([1, 16, 1024])
-            # # recurrent_state shape: torch.Size([1, 16, 4096])
-            # # actions shape: torch.Size([1, 16, 9])
-            # # post shape: torch.Size([1, 16, 32, 32])
+    ##############################################################################################################################################################################
+    # ### i think we only use coupled???
+    # if cfg.algo.world_model.decoupled_rssm:
+    #     posteriors_logits, posteriors = world_model.rssm._representation(embedded_obs)
+    #     for i in range(0, sequence_length):
+    #         if i == 0:
+    #             posterior = torch.zeros_like(posteriors[:1])
+    #         else:
+    #             posterior = posteriors[i - 1 : i]
+    #         recurrent_state, posterior_logits, prior_logits = world_model.rssm.dynamic(
+    #             posterior,
+    #             recurrent_state,
+    #             batch_actions[i : i + 1],
+    #             data["is_first"][i : i + 1],
+    #         )
+    #         recurrent_states[i] = recurrent_state
+    #         priors_logits[i] = prior_logits
+    # else:
+    #     posterior = torch.zeros(1, batch_size, stochastic_size, discrete_size, device=device)
+    #     posteriors = torch.empty(sequence_length, batch_size, stochastic_size, discrete_size, device=device)
+    #     posteriors_logits = torch.empty(sequence_length, batch_size, stoch_state_size, device=device)
+    #     for i in range(0, sequence_length):
+    #         ### h, z, z^
 
-            recurrent_states[i] = recurrent_state
-            priors_logits[i] = prior_logits
-            posteriors[i] = posterior
-            posteriors_logits[i] = posterior_logits
+    #         recurrent_state, posterior, _, posterior_logits, prior_logits = world_model.rssm.dynamic(
+    #             posterior,
+    #             recurrent_state,
+    #             batch_actions[i : i + 1],
+    #             embedded_obs[i : i + 1],
+    #             data["is_first"][i : i + 1],
+    #         )
+    #         # print("THEIR DYNAMICS")
+    #         # print("prior shape:", prior_logits.shape)
+    #         # print("recurrent_state shape:", recurrent_state.shape)
+    #         # print("actions shape:", batch_actions[i : i + 1].shape)
+    #         # print("post shape:", posterior.shape)
+    #         # # THEIR DYNAMICS
+    #         # # prior shape: torch.Size([1, 16, 1024])
+    #         # # recurrent_state shape: torch.Size([1, 16, 4096])
+    #         # # actions shape: torch.Size([1, 16, 9])
+    #         # # post shape: torch.Size([1, 16, 32, 32])
 
-    ### flatten posteriors but only the 32x32, keep (sequence_length, batch_size, 32x32)
-    ### concat with recurrent_states (sequence_length, batch_size, x)
-    latent_states = torch.cat((posteriors.view(*posteriors.shape[:-2], -1), recurrent_states), -1)
+    #         recurrent_states[i] = recurrent_state
+    #         priors_logits[i] = prior_logits
+    #         posteriors[i] = posterior
+    #         posteriors_logits[i] = posterior_logits
+
+    # ### flatten posteriors but only the 32x32, keep (sequence_length, batch_size, 32x32)
+    # ### concat with recurrent_states (sequence_length, batch_size, x)
+    # latent_states = torch.cat((posteriors.view(*posteriors.shape[:-2], -1), recurrent_states), -1)
+    ##############################################################################################################################################################################
+    
+    # Dynamic Learning
+    latent_states, priors_logits, posteriors_logits, posteriors, recurrent_states = compiled_dynamic_learning(
+        world_model,
+        data,
+        batch_actions,
+        embedded_obs,
+        stochastic_size,
+        discrete_size,
+        recurrent_state_size,
+        batch_size,
+        sequence_length,
+        cfg.algo.world_model.decoupled_rssm,
+        device,
+    )
 
     # Compute predictions for the observations
     reconstructed_obs: Dict[str, torch.Tensor] = world_model.observation_model(latent_states) ## Decoder
@@ -231,112 +429,141 @@ def train(
         )
     world_optimizer.step()
 
+    
+
     # print("Behaviour Learning ~Actor-Critic stuff")
     # Behaviour Learning    ## (Actor-Critic) ~ this shoulnd be important for rehearsal training
-    imagined_prior = posteriors.detach().reshape(1, -1, stoch_state_size)               ## ? wird später in imagination überschrieben ~Josch
-    recurrent_state = recurrent_states.detach().reshape(1, -1, recurrent_state_size)
-    imagined_latent_state = torch.cat((imagined_prior, recurrent_state), -1)
-    imagined_trajectories = torch.empty(
-        cfg.algo.horizon + 1,
-        batch_size * sequence_length,
-        stoch_state_size + recurrent_state_size,
-        device=device,
+
+
+    # Behaviour Learning
+    imagined_trajectories, imagined_actions = compiled_behaviour_learning(
+        posteriors,
+        recurrent_states,
+        posteriors_logits,
+        data,
+        world_model,
+        actor,
+        stoch_state_size,
+        recurrent_state_size,
+        batch_size,
+        sequence_length,
+        cfg.algo.horizon,
+        device,
+        episodic_memory,
+        read_dream_mean_std,
+        read_z,
+        cfg.episodic_memory.use_acd,
+        cfg.episodic_memory.adc_weighting,
+        cfg.episodic_memory.k_neighbors,
+        cfg.episodic_memory.read_exp_mov_avg_alpha
     )
-    imagined_trajectories[0] = imagined_latent_state
-    imagined_actions = torch.empty(
-        cfg.algo.horizon + 1,
-        batch_size * sequence_length,
-        data["actions"].shape[-1],
-        device=device,
-    )
-    actions = torch.cat(actor(imagined_latent_state.detach())[0], dim=-1)
-    imagined_actions[0] = actions
 
-    # print("their actions:", actions, actions.shape)
+    # ##############################################################################################################################################################################
+    # imagined_prior = posteriors.detach().reshape(1, -1, stoch_state_size)               ## ? wird später in imagination überschrieben ~Josch
+    # recurrent_state = recurrent_states.detach().reshape(1, -1, recurrent_state_size)
+    # imagined_latent_state = torch.cat((imagined_prior, recurrent_state), -1)
+    # imagined_trajectories = torch.empty(
+    #     cfg.algo.horizon + 1,
+    #     batch_size * sequence_length,
+    #     stoch_state_size + recurrent_state_size,
+    #     device=device,
+    # )
+    # imagined_trajectories[0] = imagined_latent_state
+    # imagined_actions = torch.empty(
+    #     cfg.algo.horizon + 1,
+    #     batch_size * sequence_length,
+    #     data["actions"].shape[-1],
+    #     device=device,
+    # )
+    # actions = torch.cat(actor(imagined_latent_state.detach())[0], dim=-1)
+    # imagined_actions[0] = actions
 
-    # The imagination goes like this, with H=3:
-    # Actions:           a'0      a'1      a'2     a'4
-    #                    ^ \      ^ \      ^ \     ^
-    #                   /   \    /   \    /   \   /
-    #                  /     \  /     \  /     \ /
-    # States:        z0 ---> z'1 ---> z'2 ---> z'3
-    # Rewards:       r'0     r'1      r'2      r'3
-    # Values:        v'0     v'1      v'2      v'3
-    # Lambda-values:         l'1      l'2      l'3
-    # Continues:     c0      c'1      c'2      c'3
-    # where z0 comes from the posterior, while z'i is the imagined states (prior)
+    # # print("their actions:", actions, actions.shape)
 
-    # Imagine trajectories in the latent space
-    # start_time_loop = time.perf_counter_ns()
-    # for i in range(1, cfg.algo.horizon + 1):
-    #     imagined_prior, recurrent_state = world_model.rssm.imagination(imagined_prior, recurrent_state, actions)
-    #     imagined_prior = imagined_prior.view(1, -1, stoch_state_size)
+    # # The imagination goes like this, with H=3:
+    # # Actions:           a'0      a'1      a'2     a'4
+    # #                    ^ \      ^ \      ^ \     ^
+    # #                   /   \    /   \    /   \   /
+    # #                  /     \  /     \  /     \ /
+    # # States:        z0 ---> z'1 ---> z'2 ---> z'3
+    # # Rewards:       r'0     r'1      r'2      r'3
+    # # Values:        v'0     v'1      v'2      v'3
+    # # Lambda-values:         l'1      l'2      l'3
+    # # Continues:     c0      c'1      c'2      c'3
+    # # where z0 comes from the posterior, while z'i is the imagined states (prior)
+
+    # # Imagine trajectories in the latent space
+    # # start_time_loop = time.perf_counter_ns()
+    # # for i in range(1, cfg.algo.horizon + 1):
+    # #     imagined_prior, recurrent_state = world_model.rssm.imagination(imagined_prior, recurrent_state, actions)
+    # #     imagined_prior = imagined_prior.view(1, -1, stoch_state_size)
+    # #     imagined_latent_state = torch.cat((imagined_prior, recurrent_state), -1)
+    # #     imagined_trajectories[i] = imagined_latent_state
+    # #     actions = torch.cat(actor(imagined_latent_state.detach())[0], dim=-1)
+    # #     imagined_actions[i] = actions
+    # # print("Their Total imagination loop duration          :", (time.perf_counter_ns()- start_time_loop)/1000_000, "ms") ### ~ 50ms
+    # # torch.cuda.synchronize()
+    # # start_time_loop = time.perf_counter_ns()
+    # prev_imagined_prior_logits = posteriors_logits.detach().reshape(1, -1, stoch_state_size) ## torch.empty_like(imagined_prior, device=device)
+    # prev_recurrent_state = torch.empty_like(recurrent_state, device=device)
+    # prev_recurrent_state.copy_(recurrent_state)
+    # for i in range(1, cfg.algo.horizon + 1):    ## lopin 15 times
+    #     ## TODO: Assumption: currently these values get detached before loss backward, so no WorldModel is trained here 
+    #     ##   (so we could combine both _transition calls in imagination for faster inference (one call for actual value, one only for uncertainties))
+
+    #     ## TODO: check is this is currect with imagined_prior, recurrent_state
+    #     if episodic_memory is not None:
+    #         imagined_prior_logits, recurrent_state, uncertainties = world_model.rssm.imagination(imagined_prior, recurrent_state, actions, \
+    #                                                                                       return_logits=True, return_uncertainty = True)
+    #     else:
+    #         imagined_prior, recurrent_state = world_model.rssm.imagination(imagined_prior, recurrent_state, actions, return_uncertainty = False)
+    #         imagined_prior = imagined_prior.view(1, -1, stoch_state_size)   ## after: -> [1, 1024, 1024]
+    #     # assert(not torch.equal(prev_imagined_prior, imagined_prior))
+
+    #     ### update treshold based on rolling mean and std ~0.145592ms
+    #     if episodic_memory is not None:
+    #         read_dream_mean_std[0] = torch.mean(uncertainties) * cfg.episodic_memory.read_exp_mov_avg_alpha + read_dream_mean_std[0] * (1 - cfg.episodic_memory.read_exp_mov_avg_alpha)           
+    #         read_dream_mean_std[1] = torch.std(uncertainties) * cfg.episodic_memory.read_exp_mov_avg_alpha + read_dream_mean_std[1] * (1 - cfg.episodic_memory.read_exp_mov_avg_alpha)
+    #         lookup_treshold = read_dream_mean_std[0] + read_z * read_dream_mean_std[1]
+
+    #         if cfg.episodic_memory.use_acd:
+    #             k: int = cfg.episodic_memory.k_neighbors
+
+    #             uncertainty_mask = uncertainties > lookup_treshold          ## shape [1024]
+
+    #             ## ACDs: [num_uncertainties>_threashold, 1, 1024]
+    #             ## TODO: AKTUELL: query = (h_t+1, z_t+1, a_t)
+    #             ACDs: torch.tensor = parallel_additive_correction_delta(prev_recurrent_state[:, uncertainty_mask, :], 
+    #                                                                 prev_imagined_prior_logits[:, uncertainty_mask, :], 
+    #                                                                 actions[:, uncertainty_mask, :], 
+    #                                                                 episodic_memory, 
+    #                                                                 world_model, 
+    #                                                                 k, 
+    #                                                                 device=device,
+    #                                                                 cfg=cfg)
+
+    #             imagined_prior_logits[:, uncertainty_mask, :] += ACDs
+
+    #             prev_recurrent_state.copy_(recurrent_state)
+    #             prev_imagined_prior_logits.copy_(imagined_prior_logits)
+
+    #         imagined_prior = compute_stochastic_state(imagined_prior_logits, discrete=world_model.rssm.discrete, sample=True)
+    #         imagined_prior = imagined_prior.view(1, -1, stoch_state_size)
+
     #     imagined_latent_state = torch.cat((imagined_prior, recurrent_state), -1)
     #     imagined_trajectories[i] = imagined_latent_state
     #     actions = torch.cat(actor(imagined_latent_state.detach())[0], dim=-1)
     #     imagined_actions[i] = actions
-    # print("Their Total imagination loop duration          :", (time.perf_counter_ns()- start_time_loop)/1000_000, "ms") ### ~ 50ms
-    # torch.cuda.synchronize()
-    # start_time_loop = time.perf_counter_ns()
-    prev_imagined_prior_logits = posteriors_logits.detach().reshape(1, -1, stoch_state_size) ## torch.empty_like(imagined_prior, device=device)
-    prev_recurrent_state = torch.empty_like(recurrent_state, device=device)
-    prev_recurrent_state.copy_(recurrent_state)
-    for i in range(1, cfg.algo.horizon + 1):    ## lopin 15 times
-        ## TODO: Assumption: currently these values get detached before loss backward, so no WorldModel is trained here 
-        ##   (so we could combine both _transition calls in imagination for faster inference (one call for actual value, one only for uncertainties))
+    #     # torch.cuda.synchronize()
+    #     # print(f"calc parallel ACDs duration: {(time.perf_counter_ns()- start)/1000_000}ms for EM of size: {len(episodic_memory)}")
 
-        ## TODO: check is this is currect with imagined_prior, recurrent_state
-        if episodic_memory is not None:
-            imagined_prior_logits, recurrent_state, uncertainties = world_model.rssm.imagination(imagined_prior, recurrent_state, actions, \
-                                                                                          return_logits=True, return_uncertainty = True)
-        else:
-            imagined_prior, recurrent_state = world_model.rssm.imagination(imagined_prior, recurrent_state, actions, return_uncertainty = False)
-            imagined_prior = imagined_prior.view(1, -1, stoch_state_size)   ## after: -> [1, 1024, 1024]
-        # assert(not torch.equal(prev_imagined_prior, imagined_prior))
-
-        ### update treshold based on rolling mean and std ~0.145592ms
-        if episodic_memory is not None:
-            read_dream_mean_std[0] = torch.mean(uncertainties) * cfg.episodic_memory.read_exp_mov_avg_alpha + read_dream_mean_std[0] * (1 - cfg.episodic_memory.read_exp_mov_avg_alpha)           
-            read_dream_mean_std[1] = torch.std(uncertainties) * cfg.episodic_memory.read_exp_mov_avg_alpha + read_dream_mean_std[1] * (1 - cfg.episodic_memory.read_exp_mov_avg_alpha)
-            lookup_treshold = read_dream_mean_std[0] + read_z * read_dream_mean_std[1]
-
-            if cfg.episodic_memory.use_acd:
-                k: int = cfg.episodic_memory.k_neighbors
-
-                uncertainty_mask = uncertainties > lookup_treshold          ## shape [1024]
-
-                ## ACDs: [num_uncertainties>_threashold, 1, 1024]
-                ## TODO: AKTUELL: query = (h_t+1, z_t+1, a_t)
-                ACDs: torch.tensor = parallel_additive_correction_delta(prev_recurrent_state[:, uncertainty_mask, :], 
-                                                                    prev_imagined_prior_logits[:, uncertainty_mask, :], 
-                                                                    actions[:, uncertainty_mask, :], 
-                                                                    episodic_memory, 
-                                                                    world_model, 
-                                                                    k, 
-                                                                    device=device,
-                                                                    cfg=cfg)
-
-                imagined_prior_logits[:, uncertainty_mask, :] += ACDs
-
-                prev_recurrent_state.copy_(recurrent_state)
-                prev_imagined_prior_logits.copy_(imagined_prior_logits)
-
-            imagined_prior = compute_stochastic_state(imagined_prior_logits, discrete=world_model.rssm.discrete, sample=True)
-            imagined_prior = imagined_prior.view(1, -1, stoch_state_size)
-
-        imagined_latent_state = torch.cat((imagined_prior, recurrent_state), -1)
-        imagined_trajectories[i] = imagined_latent_state
-        actions = torch.cat(actor(imagined_latent_state.detach())[0], dim=-1)
-        imagined_actions[i] = actions
-        # torch.cuda.synchronize()
-        # print(f"calc parallel ACDs duration: {(time.perf_counter_ns()- start)/1000_000}ms for EM of size: {len(episodic_memory)}")
-
-    # torch.cuda.synchronize()
-    # print("Total imagination loop duration          :", (time.perf_counter_ns()- start_time_loop)/1000_000, "ms for EM size:", len(episodic_memory))### 
+    # # torch.cuda.synchronize()
+    # # print("Total imagination loop duration          :", (time.perf_counter_ns()- start_time_loop)/1000_000, "ms for EM size:", len(episodic_memory))### 
         
-        # print(f"calc parallel ACDs duration: {(time.perf_counter_ns()- start)/1000_000}ms for EM of size: {len(episodic_memory)}")
-            # print(f"parallel additive_correction_delta duration: {(time.perf_counter_ns()- start)/1000_000}ms for EM of size: {len(episodic_memory)}")
-        # print(f"dream lookup threshold is: {lookup_treshold}")
+    #     # print(f"calc parallel ACDs duration: {(time.perf_counter_ns()- start)/1000_000}ms for EM of size: {len(episodic_memory)}")
+    #         # print(f"parallel additive_correction_delta duration: {(time.perf_counter_ns()- start)/1000_000}ms for EM of size: {len(episodic_memory)}")
+    #     # print(f"dream lookup threshold is: {lookup_treshold}")
+    # ##############################################################################################################################################################################
     # Predict values, rewards and continues
     predicted_values = TwoHotEncodingDistribution(critic(imagined_trajectories), dims=1).mean
     predicted_rewards = TwoHotEncodingDistribution(world_model.reward_model(imagined_trajectories), dims=1).mean
@@ -344,8 +571,17 @@ def train(
     true_continue = (1 - data["terminated"]).flatten().reshape(1, -1, 1)
     continues = torch.cat((true_continue, continues[1:]))
 
+    ##############################################################################################################################################################################
+    # # Estimate lambda-values
+    # lambda_values = compute_lambda_values(
+    #     predicted_rewards[1:],
+    #     predicted_values[1:],
+    #     continues[1:] * cfg.algo.gamma,
+    #     lmbda=cfg.algo.lmbda,
+    # )
+    ##############################################################################################################################################################################
     # Estimate lambda-values
-    lambda_values = compute_lambda_values(
+    lambda_values = compiled_compute_lambda_values(
         predicted_rewards[1:],
         predicted_values[1:],
         continues[1:] * cfg.algo.gamma,
@@ -713,6 +949,17 @@ def main(fabric: Fabric, cfg: Dict[str, Any]):
         fabric.print("Decoder CNN keys:", cfg.algo.cnn_keys.decoder)
         fabric.print("Decoder MLP keys:", cfg.algo.mlp_keys.decoder)
     obs_keys = cfg.algo.cnn_keys.encoder + cfg.algo.mlp_keys.encoder
+
+
+    # Compile dynamic_learning method
+    compiled_dynamic_learning = torch.compile(dynamic_learning, **cfg.algo.compile_dynamic_learning)
+
+    # Compile behaviour_learning method
+    compiled_behaviour_learning = torch.compile(behaviour_learning, **cfg.algo.compile_behaviour_learning)
+
+    # Compile compute_lambda_values method
+    compiled_compute_lambda_values = torch.compile(compute_lambda_values, **cfg.algo.compile_compute_lambda_values)
+
 
     world_model, actor, critic, target_critic, player = build_agent(
         fabric,
@@ -1117,6 +1364,9 @@ def main(fabric: Fabric, cfg: Dict[str, Any]):
                             is_continuous,
                             actions_dim,
                             moments,
+                            compiled_dynamic_learning,
+                            compiled_behaviour_learning,
+                            compiled_compute_lambda_values,
                             episodic_memory if cfg.episodic_memory.use_episodic_memory else None, 
                             read_dream_mean_std, 
                             read_z

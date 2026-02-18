@@ -468,7 +468,7 @@ class RSSM(nn.Module):
         return logits, compute_stochastic_state(logits, discrete=self.discrete)
 
     ### this is the Dynamics Predictor, need to add uncertainty calculation.
-    def _transition(self, recurrent_out: Tensor, sample_state=True) -> Tuple[Tensor, Tensor]:
+    def _transition(self, recurrent_out: Tensor, sample_state=True, mc_dropout=False) -> Tuple[Tensor, Tensor]:
         """
         Args:
             recurrent_out (Tensor): the output of the recurrent model, i.e., the deterministic part of the latent space.
@@ -479,7 +479,7 @@ class RSSM(nn.Module):
             logits (Tensor): the logits of the distribution of the prior state.
             prior (Tensor): the sampled prior stochastic state.
         """
-        logits: Tensor = self.transition_model(recurrent_out)
+        logits: Tensor = self.transition_model(recurrent_out, mc_dropout=mc_dropout)
         logits = self._uniform_mix(logits)
         return logits, compute_stochastic_state(logits, discrete=self.discrete, sample=sample_state)
     
@@ -541,14 +541,14 @@ class RSSM(nn.Module):
         # t0 = time.perf_counter()
         if return_uncertainty:
             with torch.no_grad():
-                self.transition_model.enable_mc_dropout()
+                # self.transition_model.enable_mc_dropout()
 
-                prior_logits_flat, _ = self._transition(recurrent_state)
+                prior_logits_flat, _ = self._transition(recurrent_state, mc_dropout=True)
                 # print("prior_logits_flat shape:", prior_logits_flat.shape)   # Shape: torch.Size([1, 5])
                 std = prior_logits_flat.std(dim=0)         # (B, T, D)
                 uncertainty = std.mean(dim=-1)           # (B, T)
                 # print("uncertainty shape:", uncertainty.shape)   # Shape: torch.Size([1, 5])
-                self.transition_model.disable_mc_dropout()
+                # self.transition_model.disable_mc_dropout()
             # print(f"Uncertainty calculation time (ns): {(time.perf_counter_ns()- start_time)/1000_000}ms")
             return (imagined_prior_logits if return_logits else imagined_prior), recurrent_state, uncertainty
         return (imagined_prior_logits if return_logits else imagined_prior), recurrent_state
@@ -745,16 +745,16 @@ class PlayerDV3(nn.Module):
             if return_rssm_stuff:
                 ### no grad so no gradients for transision model (dont need it, dont want to train it)
                 with torch.no_grad():
-                    self.rssm.transition_model.enable_mc_dropout()
+                    # self.rssm.transition_model.enable_mc_dropout()
                     
-                    prior_logits_flat, _ = self.rssm._transition(self.recurrent_state)
+                    prior_logits_flat, _ = self.rssm._transition(self.recurrent_state, mc_dropout=True)
                     std = prior_logits_flat.std(dim=0)  # (B, T, D)
                     uncertainty = std.mean(dim=-1)      # (B, T)
                     # Shape Mean: torch.Size([1, 4096])
                     # Shape Std: torch.Size([1, 4096])
                     # Logits Shape:torch.Size([5, 1, 4096])
 
-                    self.rssm.transition_model.disable_mc_dropout()
+                    # self.rssm.transition_model.disable_mc_dropout()
 
         ## z_t = Encoder(h_t, x_t)            
         self.z_logits, self.stochastic_state = self.rssm._representation(self.recurrent_state, embedded_obs)    ## z (second part from Encoder of the paper)
@@ -911,35 +911,63 @@ class Actor(nn.Module):
             if self.distribution == "tanh_normal":
                 mean = 5 * torch.tanh(mean / 5)
                 std = F.softplus(std + self.init_std) + self.min_std
-                actions_dist = Normal(mean, std)
-                actions_dist = Independent(TransformedDistribution(actions_dist, TanhTransform()), 1)
+                # actions_dist = Normal(mean, std)
+                # actions_dist = Independent(TransformedDistribution(actions_dist, TanhTransform()), 1)
+                dist = Normal(mean, std)
+                dist = Independent(TransformedDistribution(dist, TanhTransform()), 1)
             elif self.distribution == "normal":
-                actions_dist = Normal(mean, std)
-                actions_dist = Independent(actions_dist, 1)
+                # actions_dist = Normal(mean, std)
+                # actions_dist = Independent(actions_dist, 1)
+                dist = Normal(mean, std)
+                dist = Independent(dist, 1)
             elif self.distribution == "scaled_normal":
                 std = (self.max_std - self.min_std) * torch.sigmoid(std + self.init_std) + self.min_std
                 dist = Normal(torch.tanh(mean), std)
-                actions_dist = Independent(dist, 1)
-            if not greedy:
-                actions = actions_dist.rsample()
+                # actions_dist = Independent(dist, 1)
+                dist = Independent(dist, 1)
             else:
-                sample = actions_dist.sample((100,))
-                log_prob = actions_dist.log_prob(sample)
+                raise ValueError(f"Unknown distribution: {self.distribution}")
+            # if not greedy:
+            #     actions = actions_dist.rsample()
+            # else:
+            #     sample = actions_dist.sample((100,))
+            #     log_prob = actions_dist.log_prob(sample)
+            #     actions = sample[log_prob.argmax(0)].view(1, 1, -1)
+            # if self._action_clip > 0.0:
+            #     action_clip = torch.full_like(actions, self._action_clip)
+            #     actions = actions * (action_clip / torch.maximum(action_clip, torch.abs(actions))).detach()
+            # actions = [actions]
+            # actions_dist = [actions_dist]
+            if greedy:
+                sample = dist.sample((100,))
+                log_prob = dist.log_prob(sample)
                 actions = sample[log_prob.argmax(0)].view(1, 1, -1)
+            else:
+                actions = dist.rsample()
             if self._action_clip > 0.0:
                 action_clip = torch.full_like(actions, self._action_clip)
                 actions = actions * (action_clip / torch.maximum(action_clip, torch.abs(actions))).detach()
             actions = [actions]
-            actions_dist = [actions_dist]
+            actions_dist = [dist]
+        # else:
+        #     actions_dist: List[Distribution] = []
+        #     actions: List[Tensor] = []
+        #     for logits in pre_dist:
+        #         actions_dist.append(OneHotCategoricalStraightThrough(logits=self._uniform_mix(logits)))
+        #         if not greedy:
+        #             actions.append(actions_dist[-1].rsample())
+        #         else:
+        #             actions.append(actions_dist[-1].mode)
+        # return tuple(actions), tuple(actions_dist)
         else:
-            actions_dist: List[Distribution] = []
-            actions: List[Tensor] = []
-            for logits in pre_dist:
-                actions_dist.append(OneHotCategoricalStraightThrough(logits=self._uniform_mix(logits)))
-                if not greedy:
-                    actions.append(actions_dist[-1].rsample())
+            actions: List[Tensor] = [None for _ in range(len(pre_dist))]
+            actions_dist: List[Distribution] = [None for _ in range(len(pre_dist))]
+            for i, logits in enumerate(pre_dist):
+                actions_dist[i] = OneHotCategoricalStraightThrough(logits=self._uniform_mix(logits))
+                if greedy:
+                    actions[i] = actions_dist[i].mode
                 else:
-                    actions.append(actions_dist[-1].mode)
+                    actions[i] = actions_dist[i].rsample()
         return tuple(actions), tuple(actions_dist)
 
     def _uniform_mix(self, logits: Tensor) -> Tensor:
@@ -1315,6 +1343,28 @@ def build_agent(
         fabric_player.device,
         discrete_size=cfg.algo.world_model.discrete_size,
     )
+
+    # Compile world model models with torch.compile
+    world_model.encoder = torch.compile(world_model.encoder, **cfg.algo.world_model.encoder.compile)
+    world_model.observation_model = torch.compile(
+        world_model.observation_model, **cfg.algo.world_model.observation_model.compile
+    )
+    world_model.reward_model = torch.compile(world_model.reward_model, **cfg.algo.world_model.reward_model.compile)
+    world_model.rssm.recurrent_model = torch.compile(
+        world_model.rssm.recurrent_model, **cfg.algo.world_model.recurrent_model.compile
+    )
+    world_model.rssm.representation_model = torch.compile(
+        world_model.rssm.representation_model, **cfg.algo.world_model.representation_model.compile
+    )
+    world_model.rssm.transition_model = torch.compile(
+        world_model.rssm.transition_model, **cfg.algo.world_model.transition_model.compile
+    )
+    if cfg.algo.world_model.continue_model:
+        world_model.continue_model = torch.compile(
+            world_model.continue_model, **cfg.algo.world_model.continue_model.compile
+        )
+    actor = torch.compile(actor, **cfg.algo.actor.compile)
+    critic = torch.compile(critic, **cfg.algo.critic.compile)
 
     # Setup models with Fabric
     world_model.encoder = fabric.setup_module(world_model.encoder)
