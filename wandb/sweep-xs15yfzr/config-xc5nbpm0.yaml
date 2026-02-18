@@ -1,0 +1,16 @@
+wandb_version: 1
+
+episodic_memory.adc_weighting:
+  value: true
+episodic_memory.capacity:
+  value: 4096
+episodic_memory.fill_parallel_to_buffer:
+  value: true
+episodic_memory.prune_fraction:
+  value: 0.4650467193182886
+episodic_memory.replace_by_acd:
+  value: false
+episodic_memory.std_multiplier:
+  value: 0.63712875314528
+episodic_memory.use_acd:
+  value: false

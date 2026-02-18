@@ -689,9 +689,10 @@ def main(fabric: Fabric, cfg: Dict[str, Any]):
 
     # Create Logger. This will create the logger only on the
     # rank-0 process
+    from wandb.integration.lightning.fabric import WandbLogger
     logger = get_logger(fabric, cfg)
     if logger and fabric.is_global_zero:
-        fabric._loggers = [logger]
+        fabric._loggers = [logger, WandbLogger(project="dem")]
         fabric.logger.log_hyperparams(cfg)
     log_dir = get_log_dir(fabric, cfg.root_dir, cfg.run_name)
     fabric.print(f"Log dir: {log_dir}")

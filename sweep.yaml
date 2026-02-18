@@ -1,0 +1,37 @@
+method: bayes
+metric:
+  name: Rewards/rew_avg
+  goal: maximize
+
+parameters:
+  episodic_memory.capacity:
+    values: [256, 512, 2048, 4096] ## 1024 was default, so should be investigated
+  
+  episodic_memory.use_acd:
+    values: [true, false]
+  
+  episodic_memory.adc_weighting:
+    values: [true, false]
+  
+  episodic_memory.fill_parallel_to_buffer:
+    values: [true, false]
+
+  episodic_memory.replace_by_acd:
+    values: [true, false]
+  episodic_memory.prune_fraction:
+    min: 0.1
+    max: 1.0
+
+  episodic_memory.std_multiplier:
+    min: 0.5
+    max: 1.0
+
+program: sheeprl.py
+command: 
+  - ${env}
+  - uv
+  - run
+  - ${program}
+  - exp=dem_100k_hero
+  - algo=dem
+  - fabric.accelerator=cuda

@@ -9,6 +9,7 @@ from lightning.fabric.plugins.collectives import TorchCollective
 from lightning.fabric.utilities.cloud_io import _is_dir, get_filesystem
 
 
+
 def get_logger(fabric: Fabric, cfg: Dict[str, Any]) -> Optional[Logger]:
     # Set logger only on rank-0 but share the logger directory: since we don't know
     # what is happening during the `fabric.save()` method, at least we assure that all

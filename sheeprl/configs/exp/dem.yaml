@@ -37,13 +37,15 @@ episodic_memory:
   read_exp_mov_avg_alpha: 0.99    # moving average alpha for read threshold (inside dreaming [when to read from em])
   write_window_size_N: 128        # window size N for write threshold moving average (env interactions [when to write to em])
 
-  read_std_multiplier_start: 0.0  # initial multiplier for read threshold std 
-  read_std_multiplier_max: 1.0    # final multiplier for read threshold std
+  std_multiplier: 1.0
+
+  read_std_multiplier_start: ${episodic_memory.std_multiplier}  # initial multiplier for read threshold std 
+  read_std_multiplier_max: ${episodic_memory.std_multiplier}    # final multiplier for read threshold std
   read_std_inc_addend: 0.0001      # exponential increase factor for read threshold std (not exponentail anymore, but additive)
   read_std_inc_start_at_ep: 000   # in which episode to start increasing read std multiplier
   
-  write_std_multiplier_start: 0.0 # initial multiplier for write threshold std
-  write_std_multiplier_max: 1.0   # final multiplier for write threshold std
+  write_std_multiplier_start: ${episodic_memory.std_multiplier} # initial multiplier for write threshold std
+  write_std_multiplier_max: ${episodic_memory.std_multiplier}   # final multiplier for write threshold std
   write_std_inc_addend: 0.0001     # exponential increase factor for write threshold std (not exponentail anymore, but additive)
   write_std_inc_start_at_ep: 000  # in which to start increasing write std multiplier
   # ---------------------------------###
