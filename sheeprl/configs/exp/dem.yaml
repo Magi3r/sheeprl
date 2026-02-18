@@ -20,6 +20,7 @@ episodic_memory:
   normalize_kNN: false
   softmax_kNN: false             # apply softmax to z in key
   adc_weighting: true
+  replace_by_acd: false
 
   ### legacy, will remove if nothings breaks ###
   # read_threshold_last_N: 128
@@ -71,7 +72,7 @@ algo:
 #   type: "auto"
 
 metric:
-  log_every: 1000
+  log_every: 5000
   # aggregator:
   #   metrics:
   #     Loss/world_model_loss:

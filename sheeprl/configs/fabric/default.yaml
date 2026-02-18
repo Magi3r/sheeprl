@@ -3,7 +3,8 @@ devices: 1
 num_nodes: 1
 strategy: "auto"
 accelerator: "cpu"
-precision: "32-true"
+# precision: "32-true"
+precision: "bf16-mixed"
 callbacks:
   - _target_: sheeprl.utils.callback.CheckpointCallback
     keep_last: "${checkpoint.keep_last}"

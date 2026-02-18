@@ -57,6 +57,8 @@ from sheeprl.algos.dem.episodic_memory_gpu import GPUEpisodicMemory as EM
 # os.environ["PYOPENGL_PLATFORM"] = ""
 # os.environ["MUJOCO_GL"] = "osmesa"
 
+## GPT says thats good (oder zumindest wie original DreamerV3 das machen würde)
+# from sheeprl.utils.agc import adaptive_gradient_clipping
 
 def train(
     fabric: Fabric,
@@ -104,6 +106,8 @@ def train(
     # Rewards:       0        r1       r2       r3
     # Dones:         0        d1       d2       d3
     # Is-first       1        i1       i2       i3
+
+    # warnings.warn("GPT CODE TROJANER IM TRAINING MIT ADAPTIVE GRADIENT CLIPPING - SIEHE UNTEN")
 
     batch_size = cfg.algo.per_rank_batch_size
     sequence_length = cfg.algo.per_rank_sequence_length
@@ -205,22 +209,31 @@ def train(
 
     # World model optimization step. Eq. 4 in the paper
     world_optimizer.zero_grad(set_to_none=True)
-    rec_loss, kl, state_loss, reward_loss, observation_loss, continue_loss = reconstruction_loss(
-        po,
-        batch_obs,
-        pr,
-        data["rewards"],
-        priors_logits,
-        posteriors_logits,
-        cfg.algo.world_model.kl_dynamic,
-        cfg.algo.world_model.kl_representation,
-        cfg.algo.world_model.kl_free_nats,
-        cfg.algo.world_model.kl_regularizer,
-        pc,
-        continues_targets,
-        cfg.algo.world_model.continue_scale_factor,
-    )
+    with fabric.autocast():
+        rec_loss, kl, state_loss, reward_loss, observation_loss, continue_loss = reconstruction_loss(
+            po,
+            batch_obs,
+            pr,
+            data["rewards"],
+            priors_logits,
+            posteriors_logits,
+            cfg.algo.world_model.kl_dynamic,
+            cfg.algo.world_model.kl_representation,
+            cfg.algo.world_model.kl_free_nats,
+            cfg.algo.world_model.kl_regularizer,
+            pc,
+            continues_targets,
+            cfg.algo.world_model.continue_scale_factor,
+        )
     fabric.backward(rec_loss)
+
+    ## TODO: das is von GPT!!!!
+    # adaptive_gradient_clipping(
+    #     world_model.parameters(),
+    #     clipping=0.3,   # DreamerV3 constant
+    #     eps=1e-3        # DreamerV3 constant
+    # )
+
     world_model_grads = None
     if cfg.algo.world_model.clip_gradients is not None and cfg.algo.world_model.clip_gradients > 0:
         world_model_grads = fabric.clip_gradients(
@@ -316,7 +329,10 @@ def train(
                                                                     device=device,
                                                                     cfg=cfg)
 
-                imagined_prior_logits[:, uncertainty_mask, :] += ACDs
+                if cfg.episodic_memory.replace_by_acd:
+                    imagined_prior_logits[:, uncertainty_mask, :] = ACDs
+                else:
+                    imagined_prior_logits[:, uncertainty_mask, :] += ACDs
 
                 prev_recurrent_state.copy_(recurrent_state)
                 prev_imagined_prior_logits.copy_(imagined_prior_logits)
@@ -367,32 +383,37 @@ def train(
     # Lambda-values:        [l'1]    [l'2]    [l'3]
     # Entropies:    [e'0]   [e'1]    [e'2]
     actor_optimizer.zero_grad(set_to_none=True)
-    policies: Sequence[Distribution] = actor(imagined_trajectories.detach())[1]
+    with fabric.autocast():
+        policies: Sequence[Distribution] = actor(imagined_trajectories.detach())[1]
 
-    baseline = predicted_values[:-1]
-    offset, invscale = moments(lambda_values, fabric)
-    normed_lambda_values = (lambda_values - offset) / invscale
-    normed_baseline = (baseline - offset) / invscale
-    advantage = normed_lambda_values - normed_baseline
-    if is_continuous:
-        objective = advantage
-    else:
-        objective = (
-            torch.stack(
-                [
-                    p.log_prob(imgnd_act.detach()).unsqueeze(-1)[:-1]
-                    for p, imgnd_act in zip(policies, torch.split(imagined_actions, actions_dim, dim=-1))
-                ],
-                dim=-1,
-            ).sum(dim=-1)
-            * advantage.detach()
-        )
-    try:
-        entropy = cfg.algo.actor.ent_coef * torch.stack([p.entropy() for p in policies], -1).sum(dim=-1)
-    except NotImplementedError:
-        entropy = torch.zeros_like(objective)
-    policy_loss = -torch.mean(discount[:-1].detach() * (objective + entropy.unsqueeze(dim=-1)[:-1]))
+        baseline = predicted_values[:-1]
+        offset, invscale = moments(lambda_values, fabric)
+        normed_lambda_values = (lambda_values - offset) / invscale
+        normed_baseline = (baseline - offset) / invscale
+        advantage = normed_lambda_values - normed_baseline
+        if is_continuous:
+            objective = advantage
+        else:
+            objective = (
+                torch.stack(
+                    [
+                        p.log_prob(imgnd_act.detach()).unsqueeze(-1)[:-1]
+                        for p, imgnd_act in zip(policies, torch.split(imagined_actions, actions_dim, dim=-1))
+                    ],
+                    dim=-1,
+                ).sum(dim=-1)
+                * advantage.detach()
+            )
+        try:
+            entropy = cfg.algo.actor.ent_coef * torch.stack([p.entropy() for p in policies], -1).sum(dim=-1)
+        except NotImplementedError:
+            entropy = torch.zeros_like(objective)
+        policy_loss = -torch.mean(discount[:-1].detach() * (objective + entropy.unsqueeze(dim=-1)[:-1]))
     fabric.backward(policy_loss)
+
+    ## GPT CODE!!!!!!
+    # adaptive_gradient_clipping(actor.parameters(), clipping=0.3, eps=1e-3)
+
     actor_grads = None
     if cfg.algo.actor.clip_gradients is not None and cfg.algo.actor.clip_gradients > 0:
         actor_grads = fabric.clip_gradients(
@@ -408,11 +429,16 @@ def train(
 
     # Critic optimization. Eq. 10 in the paper
     critic_optimizer.zero_grad(set_to_none=True)
-    value_loss = -qv.log_prob(lambda_values.detach())
-    value_loss = value_loss - qv.log_prob(predicted_target_values.detach())
-    value_loss = torch.mean(value_loss * discount[:-1].squeeze(-1))
+    with fabric.autocast():
+        value_loss = -qv.log_prob(lambda_values.detach())
+        value_loss = value_loss - qv.log_prob(predicted_target_values.detach())
+        value_loss = torch.mean(value_loss * discount[:-1].squeeze(-1))
 
     fabric.backward(value_loss)
+
+    ## GPT CODE!!!!!!
+    # adaptive_gradient_clipping(critic.parameters(), clipping=0.3, eps=1e-3)
+
     critic_grads = None
     if cfg.algo.critic.clip_gradients is not None and cfg.algo.critic.clip_gradients > 0:
         critic_grads = fabric.clip_gradients(
@@ -541,15 +567,23 @@ def rehearsal_train(fabric:             Fabric,
         ## Encoder & Decoder will not be optimized, since we did not call them beforehand
         world_optimizer.zero_grad(set_to_none=True)
         ## world_model.encoder.zero_grad(set_to_none=True)
-        rec_loss, kl, state_loss = reconstruction_loss_rehearsal(
-            priors_logits[:,:j],
-            posteriors_logits[:,:j],
-            cfg.algo.world_model.kl_dynamic,
-            cfg.algo.world_model.kl_representation,
-            cfg.algo.world_model.kl_free_nats,
-            cfg.algo.world_model.kl_regularizer,
-        )
+        with fabric.autocast():
+            rec_loss, kl, state_loss = reconstruction_loss_rehearsal(
+                priors_logits[:,:j],
+                posteriors_logits[:,:j],
+                cfg.algo.world_model.kl_dynamic,
+                cfg.algo.world_model.kl_representation,
+                cfg.algo.world_model.kl_free_nats,
+                cfg.algo.world_model.kl_regularizer,
+            )
         fabric.backward(rec_loss)
+        
+        ## TODO: GPT CODE
+        # adaptive_gradient_clipping(
+        #     world_model.parameters(),
+        #     clipping=0.3,   # DreamerV3 constant
+        #     eps=1e-3        # DreamerV3 constant
+        # )
         world_model_grads = None
         if cfg.algo.world_model.clip_gradients is not None and cfg.algo.world_model.clip_gradients > 0:
             world_model_grads = fabric.clip_gradients(
