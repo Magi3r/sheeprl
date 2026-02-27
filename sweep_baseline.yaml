@@ -1,0 +1,25 @@
+method: random
+metric:
+  name: Rewards/rew_avg
+  goal: maximize
+
+early_terminate:
+  type: none
+  max_iter: 100000
+
+parameters:
+  seed:
+    values: [0,1]
+
+
+program: sheeprl.py
+command: 
+  - ${env}
+  - uv
+  - run
+  - ${program}
+  - exp=dem_100k_breakout
+  - algo=dreamer_v3
+  - fabric.accelerator=cuda
+
+
