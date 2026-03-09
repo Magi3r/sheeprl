@@ -1,14 +1,14 @@
 #!/bin/bash
 
-game="dem_100k_hero"
-# game="dem_100k_ms_pacman"
+# game="dem_100k_hero"
+game="dem_100k_ms_pacman"
 num_parallel=1
-GPUS=(0)
+GPUS=(0 )
 
 i=0
 
 # for acd in true false; do
-for seed in 1 2; do
+for seed in 0 1 2 3; do
   sleep 5
   GPU=${GPUS[$((i % ${#GPUS[@]}))]}
   # echo "CUDA_VISIBLE_DEVICES=$GPU uv run sheeprl.py exp=$game algo=dem fabric.accelerator=gpu fabric.strategy=auto episodic_memory.adc_weighting=$acd"

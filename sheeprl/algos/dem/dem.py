@@ -10,6 +10,7 @@ import warnings
 from functools import partial
 from typing import Any, Dict, Sequence
 import time
+import wandb
 
 import gymnasium as gym
 import hydra
@@ -469,10 +470,13 @@ def train(
         aggregator.update("Loss/value_loss", value_loss.detach())
         if world_model_grads:
             aggregator.update("Grads/world_model", world_model_grads.mean().detach())
+
         if actor_grads:
             aggregator.update("Grads/actor", actor_grads.mean().detach())
+
         if critic_grads:
             aggregator.update("Grads/critic", critic_grads.mean().detach())
+
 
     # Reset everything
     actor_optimizer.zero_grad(set_to_none=True)
@@ -668,6 +672,7 @@ def update_uncertainties(fabric:             Fabric,
 
 @register_algorithm()
 def main(fabric: Fabric, cfg: Dict[str, Any]):
+    wandb.init(project="my-project")
     device = fabric.device
     rank = fabric.global_rank
     world_size = fabric.world_size  ## number of processes (GPUs)?
@@ -689,13 +694,21 @@ def main(fabric: Fabric, cfg: Dict[str, Any]):
 
     # Create Logger. This will create the logger only on the
     # rank-0 process
-    from wandb.integration.lightning.fabric import WandbLogger
+    # from wandb.integration.lightning.fabric import WandbLogger
+    # logger = get_logger(fabric, cfg)
+    # if logger and fabric.is_global_zero:
+    #     fabric._loggers = [logger, WandbLogger()]
+    #     fabric.logger.log_hyperparams(cfg)
+    # log_dir = get_log_dir(fabric, cfg.root_dir, cfg.run_name)
+    # fabric.print(f"Log dir: {log_dir}")
     logger = get_logger(fabric, cfg)
     if logger and fabric.is_global_zero:
-        fabric._loggers = [logger, WandbLogger(project="dem")]
+        fabric._loggers = [logger]
         fabric.logger.log_hyperparams(cfg)
     log_dir = get_log_dir(fabric, cfg.root_dir, cfg.run_name)
     fabric.print(f"Log dir: {log_dir}")
+
+
 
     # Environment setup
     vectorized_env = gym.vector.SyncVectorEnv if cfg.env.sync_env else gym.vector.AsyncVectorEnv
@@ -901,6 +914,7 @@ def main(fabric: Fabric, cfg: Dict[str, Any]):
     last_n_uncertainty_mean = 0.0
     last_n_uncertainty_std  = 0.0
 
+    print(f"EM SIZE (if used): config says: {cfg.episodic_memory.capacity} elements, {len(episodic_memory)} actual size")
     if cfg.episodic_memory.use_episodic_memory:
         print(f"Fill buffer at max ~{learning_starts} times and then train")
     for iter_num in tqdm(range(start_iter, total_iters + 1)):
@@ -1154,7 +1168,7 @@ def main(fabric: Fabric, cfg: Dict[str, Any]):
                             moments,
                             episodic_memory if cfg.episodic_memory.use_episodic_memory else None, 
                             read_dream_mean_std, 
-                            read_z
+                            read_z,
                         )
                         cumulative_per_rank_gradient_steps += 1
                     train_step += world_size
@@ -1179,22 +1193,39 @@ def main(fabric: Fabric, cfg: Dict[str, Any]):
             if aggregator and not aggregator.disabled:
                 metrics_dict = aggregator.compute()
                 fabric.log_dict(metrics_dict, policy_step)
+                wandb.log(metrics_dict, step=policy_step)
                 aggregator.reset()
 
             # Log replay ratio
             fabric.log(
                 "Params/replay_ratio", cumulative_per_rank_gradient_steps * world_size / policy_step, policy_step
             )
-
+            wandb.log({
+                    "Params/replay_ratio": cumulative_per_rank_gradient_steps * world_size / policy_step
+                    }, step=policy_step)
+            # wandb.log({"train/loss": loss}, step=policy_step)
             # Log EM info
             if cfg.episodic_memory.use_episodic_memory: 
+                wandb.log({
+                    "EM/size": len(episodic_memory),
+                    "EM/write_z": write_z,
+                    "EM/read_z": read_z,
+                    "EM/Write_Treshold": (last_n_uncertainty_mean + write_z * last_n_uncertainty_std),
+                    "EM/Read_Treshold": (read_dream_mean_std[0].cpu().numpy() + read_z * read_dream_mean_std[1].cpu().numpy()),
+                    "EM/Env_Uncertainty": last_n_uncertainty_mean,
+                    "EM/Img_Uncertainty": read_dream_mean_std[0].cpu().numpy(),
+                    "EM/EM_Age_Mean": (torch.mean((episodic_memory.birth_time[:len(episodic_memory)] - episodic_memory.step_counter).type(torch.float32)).cpu().numpy()) * -1,
+                    "EM/EM_Age_Std": torch.std((episodic_memory.birth_time[:len(episodic_memory)] - episodic_memory.step_counter).type(torch.float32)).cpu().numpy(),
+                    "EM/EM_Uncertainty_Mean": torch.mean(episodic_memory.uncertainty[:len(episodic_memory)]).cpu().numpy(),
+                    "EM/EM_Uncertainty_Std": torch.std(episodic_memory.uncertainty[:len(episodic_memory)]).cpu().numpy(),
+                        }, step=policy_step)
                 fabric.log("EM/size", len(episodic_memory), policy_step)
                 fabric.log("EM/write_z", write_z, policy_step)
                 fabric.log("EM/read_z", read_z, policy_step)
                 fabric.log("EM/Write_Treshold", (last_n_uncertainty_mean + write_z * last_n_uncertainty_std), policy_step)
                 fabric.log("EM/Read_Treshold", (read_dream_mean_std[0].cpu().numpy() + read_z * read_dream_mean_std[1].cpu().numpy()), policy_step) # dont know if correct
                 fabric.log("EM/Env_Uncertainty", last_n_uncertainty_mean, policy_step)
-                fabric.log("EM/Img_Uncertainty", read_dream_mean_std[0].cpu().numpy(), policy_step) # dont know if correct
+                fabric.log("EM/Img_Uncertainty", read_dream_mean_std[0].cpu().numpy(), policy_step) ### dont know if correct
                 fabric.log("EM/EM_Age_Mean", (torch.mean((episodic_memory.birth_time[:len(episodic_memory)] - episodic_memory.step_counter).type(torch.float32)).cpu().numpy()) * -1, policy_step)
                 fabric.log("EM/EM_Age_Std", torch.std((episodic_memory.birth_time[:len(episodic_memory)] - episodic_memory.step_counter).type(torch.float32)).cpu().numpy(), policy_step)
                 fabric.log("EM/EM_Uncertainty_Mean", torch.mean(episodic_memory.uncertainty[:len(episodic_memory)]).cpu().numpy(), policy_step)
@@ -1208,6 +1239,9 @@ def main(fabric: Fabric, cfg: Dict[str, Any]):
                         (train_step - last_train) / timer_metrics["Time/train_time"],
                         policy_step,
                     )
+                    wandb.log({
+                    "Time/sps_train": (train_step - last_train) / timer_metrics["Time/train_time"],
+                    }, step=policy_step)
                 if "Time/env_interaction_time" in timer_metrics and timer_metrics["Time/env_interaction_time"] > 0:
                     fabric.log(
                         "Time/sps_env_interaction",
@@ -1215,11 +1249,15 @@ def main(fabric: Fabric, cfg: Dict[str, Any]):
                         / timer_metrics["Time/env_interaction_time"],
                         policy_step,
                     )
+                    wandb.log({
+                    "Time/sps_env_interaction": ((policy_step - last_log) / world_size * cfg.env.action_repeat) / timer_metrics["Time/env_interaction_time"],
+                    }, step=policy_step)
                 timer.reset()
 
             # Reset counters
             last_log = policy_step
             last_train = train_step
+
 
         # Checkpoint Model
         if (cfg.checkpoint.every > 0 and policy_step - last_checkpoint >= cfg.checkpoint.every) or (
@@ -1267,3 +1305,5 @@ def main(fabric: Fabric, cfg: Dict[str, Any]):
             "moments": moments,
         }
         register_model(fabric, log_models, cfg, models_to_log)
+
+    wandb.finish()
