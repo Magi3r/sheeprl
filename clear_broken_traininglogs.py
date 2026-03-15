@@ -13,10 +13,16 @@ deleting_files = []
 # Iterate over all subdirectories in the logs directory
 for run_dir in os.listdir(logs_dir):
     run_dir_path = os.path.join(logs_dir, run_dir)
-    
+
     # Check if the subdirectory is a run directory (i.e., it contains a 'version_0' directory)
     if os.path.isdir(run_dir_path) and 'version_0' in os.listdir(run_dir_path):
         version_0_dir = os.path.join(run_dir_path, 'version_0')
+
+        # # also remove run_dir_path folder if version_0_dir is empty
+        # if not os.listdir(version_0_dir):
+        #     deleting_files.append(run_dir_path)
+        #     continue
+
         # Iterate over all files in the 'version_0' directory
         for file in os.listdir(version_0_dir):
             file_path = os.path.join(version_0_dir, file)
@@ -62,6 +68,7 @@ print(f"\nTotal storage to be freed: {format_bytes(total_size_bytes)}")
 
 deleting_files.sort()
 
+my_input = ""
 print(f"\ncan remove: {len(deleting_files)} files with steps <= 1000")
 if deleting_files:
     if len(deleting_files) > 10:
@@ -70,9 +77,9 @@ if deleting_files:
             if i > 9: break
     print(f"    last: {deleting_files[-1]}")
 
-    input = input(f"U sure u want to continuous deleting all {len(deleting_files)} files (y/n)?")
+    my_input = input(f"U sure u want to continuous deleting all {len(deleting_files)} files (y/n)?")
 
-if input.lower() in ["yes", "y", "ja", "j"]:
+if my_input.lower() in ["yes", "y", "ja", "j"]:
     print("deleting...")
     for dir in deleting_files:
         shutil.rmtree(dir, ignore_errors=True)
