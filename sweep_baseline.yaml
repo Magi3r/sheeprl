@@ -1,11 +1,11 @@
-method: random
+method: bayesian
 metric:
   name: Rewards/rew_avg
   goal: maximize
 
-early_terminate:
-  type: none
-  max_iter: 100000
+# early_terminate:
+#   type: none
+#   max_iter: 100000
 
 parameters:
   seed:
