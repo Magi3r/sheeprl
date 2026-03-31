@@ -162,7 +162,7 @@ cython_debug/
 #.idea/
 
 .vscode
-logs*
+# logs*
 poetry.lock
 private_notebooks
 pytest_*
