@@ -1,10 +1,13 @@
 import os
 import tensorflow as tf
+tf.compat.v1.disable_eager_execution()  # disable eager execution
 import time
 import shutil
 
 # Define the path to the logs directory
-logs_dir = "./logs/runs/dem/BreakoutNoFrameskip-v4"
+# logs_dir = "./logs/runs/dem/BreakoutNoFrameskip-v4"
+# logs_dir = "./logs/runs/dem/HeroNoFrameskip-v4/"
+logs_dir = "./logs/runs/dem/SeaquestNoFrameskip-v4/"
 
 print("\n\nscanning:", logs_dir)
 
@@ -19,9 +22,9 @@ for run_dir in os.listdir(logs_dir):
         version_0_dir = os.path.join(run_dir_path, 'version_0')
 
         # # also remove run_dir_path folder if version_0_dir is empty
-        # if not os.listdir(version_0_dir):
-        #     deleting_files.append(run_dir_path)
-        #     continue
+        if not os.listdir(version_0_dir):
+            deleting_files.append(run_dir_path)
+            continue
 
         # Iterate over all files in the 'version_0' directory
         for file in os.listdir(version_0_dir):
@@ -71,7 +74,7 @@ deleting_files.sort()
 my_input = ""
 print(f"\ncan remove: {len(deleting_files)} files with steps <= 1000")
 if deleting_files:
-    if len(deleting_files) > 10:
+    if len(deleting_files) >= 10:
         for i, file in enumerate(deleting_files):
             print(f"    {i}th: {deleting_files[i]}")
             if i > 9: break

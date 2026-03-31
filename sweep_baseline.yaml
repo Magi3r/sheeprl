@@ -21,5 +21,4 @@ command:
   - exp=dem_100k_breakout
   - algo=dreamer_v3
   - fabric.accelerator=cuda
-
-
+  - ${args_no_hyphens}

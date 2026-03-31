@@ -1,15 +1,15 @@
-method: random
+method: bayesian
 metric:
   name: Rewards/rew_avg
   goal: maximize
 
-early_terminate:
-  type: none
-  max_iter: 100000
+# early_terminate:
+#   type: none
+#   max_iter: 100000
 
 parameters:
   episodic_memory.capacity:
-    values: [256, 512, 2048, 4096] ## 1024 was default, so should be investigated
+    values: [256, 1024, 512, 2048] # , 4096] ## 1024 was default, so should be investigated
 
   episodic_memory.prune_fraction:
     min: 0.1
@@ -22,29 +22,15 @@ parameters:
   episodic_memory.fill_parallel_to_buffer:
     values: [true, false]
   
-  with_acd:
-    parameters:  
-      episodic_memory.use_acd:
-        value: true
-  
-      episodic_memory.adc_weighting:
-        values: [true, false]
+  episodic_memory.use_acd:
+    value: true
 
-      episodic_memory.replace_by_acd:
-        values: [true, false]
-  
-  without_acd:
-    parameters:
-      episodic_memory.use_acd:
-        value: false
-      
-      episodic_memory.adc_weighting:
-        value: false
-  
-      episodic_memory.replace_by_acd:
-        value: false
+  episodic_memory.adc_weighting:
+    values: [true, false]
 
-
+  episodic_memory.replace_by_acd:
+    values: [true, false]
+  
 
 program: sheeprl.py
 command: 
@@ -55,5 +41,4 @@ command:
   - exp=dem_100k_breakout
   - algo=dem
   - fabric.accelerator=cuda
-
-
+  - ${args_no_hyphens}
